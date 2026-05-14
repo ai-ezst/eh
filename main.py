@@ -246,13 +246,14 @@ def filter_valid_images(images: list[bytes]) -> list[bytes]:
     return valid
 
 # ========= 发送图集 =========
-async def send_groups(bot, images):
+async def send_groups(bot, images, skip_filter=False):
     from telegram.error import RetryAfter, TimedOut, BadRequest
 
     first_msg = None
 
-    # ✅ 修复：发送前过滤比例异常图片，避免 photo_invalid_dimensions
-    images = filter_valid_images(images)
+    # 过滤比例异常图片，封面单独传入时跳过过滤
+    if not skip_filter:
+        images = filter_valid_images(images)
 
     for i in range(0, len(images), 10):
         chunk = images[i:i+10]
@@ -348,22 +349,42 @@ async def main():
                 print(f"  ⚠️ 过滤后无图片，跳过")
                 continue
 
-            # ✅ 修复：智能选封面（竖图优先，文件最大优先）
+            # 选封面（竖图优先，文件最大优先）
             cover = pick_cover(images)
-            # 封面放第一张，其余图跟在后面，确保封面出现在群组最前面
             rest = [img for img in images if img is not cover]
-            ordered = [cover] + rest
 
-            msg_id = await send_groups(bot, ordered)
+            # 第一步：封面单独发到群组（不经过比例过滤，确保封面一定出现）
+            from telegram.error import RetryAfter, TimedOut
+            cover_msg = None
+            for attempt in range(5):
+                try:
+                    msgs = await bot.send_media_group(
+                        chat_id=IMAGE_CHANNEL,
+                        media=[InputMediaPhoto(media=cover)]
+                    )
+                    cover_msg = msgs[0]
+                    print(f"  📸 封面已发到群组")
+                    break
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 2)
+                except TimedOut:
+                    await asyncio.sleep(10)
+                except Exception as e:
+                    print(f"  ⚠️ 封面发送失败 (第{attempt+1}次): {e}")
+                    await asyncio.sleep(5)
 
-            if msg_id:
-                # ✅ 修复：兼容群组（数字ID）和频道（@username）两种格式
+            await asyncio.sleep(3)
+
+            # 第二步：其余图片发到群组（经过比例过滤）
+            await send_groups(bot, rest)
+
+            # 第三步：封面发到频道，链接指向群组封面那条消息
+            if cover_msg:
+                msg_id = cover_msg.message_id
                 if IMAGE_CHANNEL.startswith("-100"):
-                    # 群组/私有频道：去掉 -100 前缀，用 /c/ 格式
                     channel_pure = IMAGE_CHANNEL[4:]
                     link = f"https://t.me/c/{channel_pure}/{msg_id}"
                 else:
-                    # 公开频道：去掉 @ 前缀
                     link = f"https://t.me/{IMAGE_CHANNEL.lstrip('@')}/{msg_id}"
                 await send_cover(bot, cover, g["title"], link)
                 print(f"  ✅ 发送完成: {g['title']}")
