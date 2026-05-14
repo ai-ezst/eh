@@ -355,7 +355,14 @@ async def main():
             msg_id = await send_groups(bot, rest)
 
             if msg_id:
-                link = f"https://t.me/{IMAGE_CHANNEL.lstrip('@')}/{msg_id}"
+                # ✅ 修复：兼容群组（数字ID）和频道（@username）两种格式
+                if IMAGE_CHANNEL.startswith("-100"):
+                    # 群组/私有频道：去掉 -100 前缀，用 /c/ 格式
+                    channel_pure = IMAGE_CHANNEL[4:]
+                    link = f"https://t.me/c/{channel_pure}/{msg_id}"
+                else:
+                    # 公开频道：去掉 @ 前缀
+                    link = f"https://t.me/{IMAGE_CHANNEL.lstrip('@')}/{msg_id}"
                 await send_cover(bot, cover, g["title"], link)
                 print(f"  ✅ 发送完成: {g['title']}")
 
