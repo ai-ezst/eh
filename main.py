@@ -350,9 +350,11 @@ async def main():
 
             # ✅ 修复：智能选封面（竖图优先，文件最大优先）
             cover = pick_cover(images)
+            # 封面放第一张，其余图跟在后面，确保封面出现在群组最前面
             rest = [img for img in images if img is not cover]
+            ordered = [cover] + rest
 
-            msg_id = await send_groups(bot, images)  # 封面也包含在群组发送里
+            msg_id = await send_groups(bot, ordered)
 
             if msg_id:
                 # ✅ 修复：兼容群组（数字ID）和频道（@username）两种格式
