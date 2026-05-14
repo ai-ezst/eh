@@ -8,19 +8,16 @@ on:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 50  # ✅ 修复：从 15 分钟增加到 50 分钟
+    timeout-minutes: 50
+
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Restore sent state
-        uses: actions/cache@v4
         with:
-          path: sent_galleries.json  # ✅ 修复：与 main.py 的 STATE_FILE 一致
-          key: sent-galleries-${{ github.run_id }}
-          restore-keys: |
-            sent-galleries-
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,21 +28,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run bot (once)
+      - name: Run bot
         env:
-          BOT_TOKEN:         ${{ secrets.BOT_TOKEN }}
-          MAIN_CHANNEL_ID:   ${{ secrets.MAIN_CHANNEL_ID }}
-          IMAGE_CHANNEL_ID:  ${{ secrets.IMAGE_CHANNEL_ID }}
-          EH_MEMBER_ID:      ${{ secrets.EH_MEMBER_ID }}
-          EH_PASS_HASH:      ${{ secrets.EH_PASS_HASH }}
-          IMG_FETCH_DELAY:   "1.0"
-          TG_SEND_DELAY:     "3.0"
-          RUN_ONCE:          "1"
+          BOT_TOKEN:        ${{ secrets.BOT_TOKEN }}
+          MAIN_CHANNEL_ID:  ${{ secrets.MAIN_CHANNEL_ID }}
+          IMAGE_CHANNEL_ID: ${{ secrets.IMAGE_CHANNEL_ID }}
+          EH_MEMBER_ID:     ${{ secrets.EH_MEMBER_ID }}
+          EH_PASS_HASH:     ${{ secrets.EH_PASS_HASH }}
         run: python main.py
 
-      - name: Save sent state
-        uses: actions/cache@v4
+      - name: Save sent state to repo
         if: always()
-        with:
-          path: sent_galleries.json  # ✅ 修复：与 main.py 的 STATE_FILE 一致
-          key: sent-galleries-${{ github.run_id }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_galleries.json
+          git diff --staged --quiet || git commit -m "chore: update sent state [skip ci]" && git push
