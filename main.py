@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import asyncio
 import re
@@ -99,8 +98,7 @@ def clean_title(title):
     title = re.sub(r'\s+', ' ', title)
     return title.strip()
 
-
-# ========= 选最佳封面 =========
+# ========= 选最佳封面（从下载的图片里挑） =========
 def pick_cover(images: list[bytes]) -> bytes:
     portrait = []
     all_imgs = []
@@ -130,7 +128,7 @@ def pick_cover(images: list[bytes]) -> bytes:
         print(f"  ⚠️ 无法解析任何图片，使用第一张作封面")
         return images[0]
 
-# ========= 抓首页 =========
+# ========= 抓首页图集列表 =========
 async def get_galleries(client):
     r = await client.get(COSPLAY_URL)
     soup = BeautifulSoup(r.text, "html.parser")
@@ -175,8 +173,8 @@ async def get_galleries(client):
     print(f"  📋 共找到 {len(galleries)} 个图集")
     return galleries
 
-# ========= 抓全部分页 =========
-async def get_all_images(client, base_url):
+# ========= 抓图集所有图片的直链 URL =========
+async def get_all_image_urls(client, base_url):
     r = await client.get(base_url)
     soup = BeautifulSoup(r.text, "html.parser")
 
@@ -191,7 +189,6 @@ async def get_all_images(client, base_url):
     print(f"📄 页数: {max_page+1}，实际抓取: {actual_pages} 页")
 
     all_pages = []
-
     for i in range(actual_pages):
         url = f"{base_url}?p={i}"
         try:
@@ -207,9 +204,10 @@ async def get_all_images(client, base_url):
 
     print(f"👉 图片页总数: {len(all_pages)}")
 
+    # 每个图片页里抓直链 URL
     semaphore = asyncio.Semaphore(3)
 
-    async def fetch(url):
+    async def fetch_img_url(url):
         for attempt in range(3):
             try:
                 async with semaphore:
@@ -223,11 +221,13 @@ async def get_all_images(client, base_url):
                 await asyncio.sleep(3)
         return None
 
-    results = await asyncio.gather(*[fetch(u) for u in all_pages])
+    results = await asyncio.gather(*[fetch_img_url(u) for u in all_pages])
     return [r for r in results if r]
 
-# ========= 下载 =========
-async def download_images(client, urls):
+# ========= 只下载封面候选图（前20张）用于选封面 =========
+async def download_cover_candidates(client, urls):
+    """只下载前20张用于挑选封面，不需要下载全部"""
+    candidates = urls[:20]
     semaphore = asyncio.Semaphore(3)
 
     async def dl(url):
@@ -238,11 +238,11 @@ async def download_images(client, urls):
                     if r.status_code == 200 and 5000 < len(r.content) < 10*1024*1024:
                         return r.content
             except Exception as e:
-                print(f"  ⚠️ 图片下载失败 (第{attempt+1}次): {e}")
+                print(f"  ⚠️ 封面候选下载失败 (第{attempt+1}次): {e}")
                 await asyncio.sleep(3)
         return None
 
-    results = await asyncio.gather(*[dl(u) for u in urls])
+    results = await asyncio.gather(*[dl(u) for u in candidates])
     return [r for r in results if r]
 
 # ========= 发封面到频道 =========
@@ -283,30 +283,31 @@ async def main():
 
             print(f"\n处理: {g['title']}")
 
-            urls = await get_all_images(client, g["url"])
+            # 抓所有图片直链
+            urls = await get_all_image_urls(client, g["url"])
             if not urls:
-                print(f"  ⚠️ 未抓到图片，跳过")
+                print(f"  ⚠️ 未抓到图片 URL，跳过")
                 continue
 
-            images = await download_images(client, urls)
-            if not images:
-                print(f"  ⚠️ 图片下载全部失败，跳过")
-                continue
+            print(f"  🔗 共获取 {len(urls)} 个图片 URL")
 
-            print(f"  ✅ 成功下载 {len(images)} 张图片")
-
-            # 创建 Telegraph 页面
+            # 用图片 URL 直接创建 Telegraph 页面（无需下载全部）
             telegraph_url = create_telegraph_page(g["title"], urls)
+            if not telegraph_url:
+                print(f"  ⚠️ Telegraph 页面失败，跳过")
+                continue
 
-            # 选封面
-            cover = pick_cover(images)
+            # 只下载前20张来挑选封面
+            candidates = await download_cover_candidates(client, urls)
+            if not candidates:
+                print(f"  ⚠️ 封面候选下载失败，跳过")
+                continue
 
-            # 封面发到频道，附带 Telegraph 链接
-            if telegraph_url:
-                await send_cover(bot, cover, g["title"], telegraph_url)
-                print(f"  ✅ 发送完成: {g['title']}")
-            else:
-                print(f"  ⚠️ Telegraph 页面失败，跳过发送")
+            cover = pick_cover(candidates)
+
+            # 发封面到频道
+            await send_cover(bot, cover, g["title"], telegraph_url)
+            print(f"  ✅ 发送完成: {g['title']}")
 
             seen.add(uid)
             save_seen(seen)
