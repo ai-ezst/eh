@@ -20,11 +20,19 @@ STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
 MAX_PAGES = 20
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+# EH 专属的高级请求头
+EH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Referer": "https://e-hentai.org/",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+}
+
+# 图床/Telegraph 纯净版的浏览器请求头 (洗掉 httpx 特征，防止 412)
+TG_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 COOKIES = {
@@ -82,21 +90,20 @@ def compress_image(img_bytes, max_size=1600, quality=85):
         print(f"  ⚠️ 图片处理/压缩失败，尝试返回原图: {e}")
         return img_bytes
 
-# ========= 异步上传至 Catbox 图床 (替代已关闭的 Telegraph 上传) =========
+# ========= 异步上传至 Catbox 图床 =========
 async def upload_to_catbox(tg_client, img_bytes):
-    """将图片上传至对 TG 即时预览极度友好的开源图床 Catbox"""
+    """将图片上传至对 TG 即时预览极度友好的开源图床 Catbox (已注入强力浏览器伪装)"""
     files = {'fileToUpload': ('image.jpg', img_bytes, 'image/jpeg')}
     data = {'reqtype': 'fileupload'}
     
     for attempt in range(3):
         try:
-            # 使用干净的客户端向 Catbox 提交
             r = await tg_client.post("https://catbox.moe/user/api.php", files=files, data=data, timeout=30)
             if r.status_code == 200 and r.text.startswith("https://files.catbox.moe/"):
                 return r.text.strip()
             else:
                 print(f"    ❌ 图床响应异常: 状态码 {r.status_code}, 详情: {r.text[:100]}")
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
         except Exception as e:
             print(f"    ⚠️ 图床网络重试 (第{attempt+1}次): {e}")
             await asyncio.sleep(2)
@@ -104,7 +111,7 @@ async def upload_to_catbox(tg_client, img_bytes):
 
 async def upload_all_images(tg_client, images_list):
     """并发上传图集所有图片到第三方图床"""
-    semaphore = asyncio.Semaphore(3)  # 控制并发度，稳定上传
+    semaphore = asyncio.Semaphore(2)  # 略微调低并发，防止触发图床高频防护
     
     async def worker(img_bytes, idx):
         async with semaphore:
@@ -331,9 +338,9 @@ async def main():
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
 
-    # 将 EH 专属的 污染Headers 彻底隔离在 eh_client 中
-    async with httpx.AsyncClient(headers=HEADERS, cookies=COOKIES, timeout=60) as eh_client, \
-               httpx.AsyncClient(timeout=30) as tg_client:
+    # 同时对两个 client 注入高度伪装的浏览器 Header
+    async with httpx.AsyncClient(headers=EH_HEADERS, cookies=COOKIES, timeout=60) as eh_client, \
+               httpx.AsyncClient(headers=TG_HEADERS, timeout=30) as tg_client:
                
         await get_or_create_telegraph_token(tg_client)
         galleries = await get_galleries(eh_client)
@@ -361,7 +368,7 @@ async def main():
                 continue
             print(f"  💾 成功落盘并压缩 {len(local_images)} 张图片到动态内存")
 
-            # 3. 并发上传至第三方稳定匿名图床
+            # 3. 并发上传至第三方稳定匿名图床 (带纯净高匿浏览器伪装)
             print("  📤 开始异步分片上传至稳定外部图床...")
             stable_image_urls = await upload_all_images(tg_client, local_images)
             if not stable_image_urls:
