@@ -44,15 +44,15 @@ async def get_or_create_telegraph_token(tg_client):
         }, timeout=15)
         if r.status_code == 200 and r.json().get("ok"):
             TELEGRAPH_TOKEN = r.json()["result"]["access_token"]
-            print(f"✅ Telegraph token 创建成功")
+            print(f"✅ Telegraph 联动 Token 创建成功")
         else:
-            print(f"❌ Telegraph token 创建失败: {r.text}")
+            print(f"❌ Telegraph 初始化失败: {r.text}")
     except Exception as e:
         print(f"❌ Telegraph 初始化异常: {e}")
 
 # ========= 智能图片压缩模块 =========
 def compress_image(img_bytes, max_size=1600, quality=85):
-    """保持长宽比压缩图片并转换为JPEG，确保严格小于5MB限制"""
+    """保持长宽比压缩图片并转换为JPEG，确保严格小于图床上限"""
     try:
         img = Image.open(BytesIO(img_bytes))
         if img.mode in ("RGBA", "P"):
@@ -82,49 +82,44 @@ def compress_image(img_bytes, max_size=1600, quality=85):
         print(f"  ⚠️ 图片处理/压缩失败，尝试返回原图: {e}")
         return img_bytes
 
-# ========= 异步多图上传至 Telegraph =========
-async def upload_to_telegraph(tg_client, img_bytes):
-    """异步上传单张图片到 Telegraph (使用干净的客户端与专属 Header)"""
-    files = {'file': ('image.jpg', img_bytes, 'image/jpeg')}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://telegra.ph/"
-    }
+# ========= 异步上传至 Catbox 图床 (替代已关闭的 Telegraph 上传) =========
+async def upload_to_catbox(tg_client, img_bytes):
+    """将图片上传至对 TG 即时预览极度友好的开源图床 Catbox"""
+    files = {'fileToUpload': ('image.jpg', img_bytes, 'image/jpeg')}
+    data = {'reqtype': 'fileupload'}
+    
     for attempt in range(3):
         try:
-            r = await tg_client.post("https://telegra.ph/upload", files=files, headers=headers, timeout=30)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, list) and len(data) > 0:
-                    return "https://telegra.ph" + data[0]["src"]
-                elif isinstance(data, dict) and "error" in data:
-                    print(f"    ❌ Telegraph 拒绝接口响应: {data['error']}")
+            # 使用干净的客户端向 Catbox 提交
+            r = await tg_client.post("https://catbox.moe/user/api.php", files=files, data=data, timeout=30)
+            if r.status_code == 200 and r.text.startswith("https://files.catbox.moe/"):
+                return r.text.strip()
             else:
-                print(f"    ❌ Telegraph 状态码异常: {r.status_code}, 详情: {r.text[:200]}")
+                print(f"    ❌ 图床响应异常: 状态码 {r.status_code}, 详情: {r.text[:100]}")
             await asyncio.sleep(1.5)
         except Exception as e:
-            print(f"    ⚠️ 上传分片网络重试 (第{attempt+1}次): {e}")
+            print(f"    ⚠️ 图床网络重试 (第{attempt+1}次): {e}")
             await asyncio.sleep(2)
     return None
 
 async def upload_all_images(tg_client, images_list):
-    """并发上传图集所有图片"""
-    semaphore = asyncio.Semaphore(2)  # 降低并发度，防止触发 Cloudflare 针对 Action IP 的硬防御
+    """并发上传图集所有图片到第三方图床"""
+    semaphore = asyncio.Semaphore(3)  # 控制并发度，稳定上传
     
     async def worker(img_bytes, idx):
         async with semaphore:
-            url = await upload_to_telegraph(tg_client, img_bytes)
+            url = await upload_to_catbox(tg_client, img_bytes)
             if url:
-                print(f"    ✨ 上传进度: [{idx+1}/{len(images_list)}] 成功")
+                print(f"    ✨ 上传进度: [{idx+1}/{len(images_list)}] 成功 -> {url}")
             return url
 
     tasks = [worker(img, i) for i, img in enumerate(images_list)]
     results = await asyncio.gather(*tasks)
     return [r for r in results if r]
 
-# ========= 创建 Telegraph 页面（含多页自动切分逻辑） =========
+# ========= 创建 Telegraph 页面 =========
 async def create_telegraph_pages(tg_client, title, t_urls):
-    """创建 Telegraph 页面，若超过300张图自动进行逆向多页动态拼接"""
+    """创建 Telegraph 页面，若超过300张图自动进行动态多页拼接"""
     if not TELEGRAPH_TOKEN:
         print("  ⚠️ 无 Telegraph token，跳过页面创建")
         return None
@@ -164,9 +159,9 @@ async def create_telegraph_pages(tg_client, title, t_urls):
                 next_page_url = r.json()["result"]["url"]
                 if idx == 0:
                     first_page_url = next_page_url
-                print(f"  ✅ Telegraph 页面生成成功 (Part {idx + 1}): {next_page_url}")
+                print(f"  ✅ Telegraph 页面动态构建成功 (Part {idx + 1}): {next_page_url}")
             else:
-                print(f"  ❌ Telegraph 页面生成失败: {r.text[:120]}")
+                print(f"  ❌ Telegraph 页面创建失败: {r.text[:120]}")
                 return first_page_url if first_page_url else next_page_url
         except Exception as e:
             print(f"  ❌ Telegraph 生成页面异常: {e}")
@@ -300,7 +295,7 @@ async def get_all_image_urls(eh_client, base_url):
 
 # ========= 全量下载并自动压缩模块 =========
 async def download_and_compress_all(eh_client, urls):
-    """并发下载全部图片，并在内存中完成压缩"""
+    """并发下载全部图片，并在内存中完成抗上限预压缩"""
     semaphore = asyncio.Semaphore(5)
 
     async def worker(url):
@@ -336,7 +331,7 @@ async def main():
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
 
-    # 将 EH 专属的 Header 和 Cookies 彻底隔离在 eh_client 中
+    # 将 EH 专属的 污染Headers 彻底隔离在 eh_client 中
     async with httpx.AsyncClient(headers=HEADERS, cookies=COOKIES, timeout=60) as eh_client, \
                httpx.AsyncClient(timeout=30) as tg_client:
                
@@ -366,15 +361,15 @@ async def main():
                 continue
             print(f"  💾 成功落盘并压缩 {len(local_images)} 张图片到动态内存")
 
-            # 3. 并发上传至 Telegraph (传入纯净的 tg_client)
-            print("  📤 开始异步分片上传至 Telegraph 服务器...")
-            telegraph_image_urls = await upload_all_images(tg_client, local_images)
-            if not telegraph_image_urls:
-                print(f"  ⚠️ 所有图片均上传 Telegraph 失败，跳过")
+            # 3. 并发上传至第三方稳定匿名图床
+            print("  📤 开始异步分片上传至稳定外部图床...")
+            stable_image_urls = await upload_all_images(tg_client, local_images)
+            if not stable_image_urls:
+                print(f"  ⚠️ 所有图片均上传图床失败，跳过")
                 continue
 
-            # 4. 创建 Telegraph 页面
-            telegraph_url = await create_telegraph_pages(tg_client, g["title"], telegraph_image_urls)
+            # 4. 创建 Telegraph 页面 (填入图床直链)
+            telegraph_url = await create_telegraph_pages(tg_client, g["title"], stable_image_urls)
             if not telegraph_url:
                 print(f"  ⚠️ Telegraph 联页节点创建失败，跳过")
                 continue
