@@ -50,7 +50,7 @@ async def get_or_create_telegraph_token(tg_client):
             "author_name": "EH Cosplay Bot",
         }, timeout=15)
         if r.status_code == 200 and r.json().get("ok"):
-            TELEGRAPH_TOKEN = r.json()[\"result\"][\"access_token\"]
+            TELEGRAPH_TOKEN = r.json()["result"]["access_token"]
             print(f"✅ Telegraph 联动 Token 创建成功")
         else:
             print(f"❌ Telegraph 初始化失败: {r.text}")
@@ -101,9 +101,9 @@ async def upload_to_backup_host(tg_client, img_bytes):
             if r.status_code == 200 and r.text.strip().startswith("http"):
                 return r.text.strip()
         except Exception:
-            pass # 悄悄失败，直接滑入备用方案
+            pass # 发生阻断则直接滑入下一步灾备方案
 
-        # --- 方案 B: sxcu.net (主流公开图床集群，Actions IP 未封锁，返回 JSON) ---
+        # --- 方案 B: sxcu.net (主流公开图床集群，返回标准的 JSON 直链数据) ---
         try:
             r = await tg_client.post("https://sxcu.net/api/files/create", files=files, timeout=20)
             if r.status_code == 200:
