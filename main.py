@@ -35,10 +35,10 @@ COOKIES = {
 TELEGRAPH_TOKEN = None
 
 # ========= Telegraph 账户初始化 =========
-async def get_or_create_telegraph_token(client):
+async def get_or_create_telegraph_token(tg_client):
     global TELEGRAPH_TOKEN
     try:
-        r = await client.post("https://api.telegra.ph/createAccount", json={
+        r = await tg_client.post("https://api.telegra.ph/createAccount", json={
             "short_name": "EHBot",
             "author_name": "EH Cosplay Bot",
         }, timeout=15)
@@ -55,8 +55,6 @@ def compress_image(img_bytes, max_size=1600, quality=85):
     """保持长宽比压缩图片并转换为JPEG，确保严格小于5MB限制"""
     try:
         img = Image.open(BytesIO(img_bytes))
-        
-        # 统一转为 RGB 模式（防止 RGBA 转换为 JPEG 时报错）
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
             
@@ -74,7 +72,6 @@ def compress_image(img_bytes, max_size=1600, quality=85):
         img.save(out, format="JPEG", quality=quality)
         compressed_data = out.getvalue()
         
-        # 二次极端兜底（如果依然大于4.5MB，降低质量再压一次）
         if len(compressed_data) > 4.5 * 1024 * 1024:
             out = BytesIO()
             img.save(out, format="JPEG", quality=60)
@@ -86,29 +83,37 @@ def compress_image(img_bytes, max_size=1600, quality=85):
         return img_bytes
 
 # ========= 异步多图上传至 Telegraph =========
-async def upload_to_telegraph(client, img_bytes):
-    """异步上传单张图片到 Telegraph"""
+async def upload_to_telegraph(tg_client, img_bytes):
+    """异步上传单张图片到 Telegraph (使用干净的客户端与专属 Header)"""
     files = {'file': ('image.jpg', img_bytes, 'image/jpeg')}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://telegra.ph/"
+    }
     for attempt in range(3):
         try:
-            r = await client.post("https://telegra.ph/upload", files=files, timeout=30)
+            r = await tg_client.post("https://telegra.ph/upload", files=files, headers=headers, timeout=30)
             if r.status_code == 200:
                 data = r.json()
                 if isinstance(data, list) and len(data) > 0:
                     return "https://telegra.ph" + data[0]["src"]
+                elif isinstance(data, dict) and "error" in data:
+                    print(f"    ❌ Telegraph 拒绝接口响应: {data['error']}")
+            else:
+                print(f"    ❌ Telegraph 状态码异常: {r.status_code}, 详情: {r.text[:200]}")
             await asyncio.sleep(1.5)
         except Exception as e:
-            print(f"    ⚠️ 上传分片重试 (第{attempt+1}次): {e}")
+            print(f"    ⚠️ 上传分片网络重试 (第{attempt+1}次): {e}")
             await asyncio.sleep(2)
     return None
 
-async def upload_all_images(client, images_list):
+async def upload_all_images(tg_client, images_list):
     """并发上传图集所有图片"""
-    semaphore = asyncio.Semaphore(3)  # 控制并发数，防止被 Telegraph 拒绝服务
+    semaphore = asyncio.Semaphore(2)  # 降低并发度，防止触发 Cloudflare 针对 Action IP 的硬防御
     
     async def worker(img_bytes, idx):
         async with semaphore:
-            url = await upload_to_telegraph(client, img_bytes)
+            url = await upload_to_telegraph(tg_client, img_bytes)
             if url:
                 print(f"    ✨ 上传进度: [{idx+1}/{len(images_list)}] 成功")
             return url
@@ -118,20 +123,18 @@ async def upload_all_images(client, images_list):
     return [r for r in results if r]
 
 # ========= 创建 Telegraph 页面（含多页自动切分逻辑） =========
-async def create_telegraph_pages(client, title, t_urls):
+async def create_telegraph_pages(tg_client, title, t_urls):
     """创建 Telegraph 页面，若超过300张图自动进行逆向多页动态拼接"""
     if not TELEGRAPH_TOKEN:
         print("  ⚠️ 无 Telegraph token，跳过页面创建")
         return None
 
-    # 按 300 张一张页面切分
     chunk_size = 300
     chunks = [t_urls[i:i + chunk_size] for i in range(0, len(t_urls), chunk_size)]
     
     next_page_url = None
     first_page_url = None
     
-    # 逆向创建页面，以便前面的页面可以链接到后面的页面
     for idx in reversed(range(len(chunks))):
         chunk = chunks[idx]
         children = [{"tag": "img", "attrs": {"src": url}} for url in chunk]
@@ -156,7 +159,7 @@ async def create_telegraph_pages(client, title, t_urls):
         }
         
         try:
-            r = await client.post("https://api.telegra.ph/createPage", data=payload, timeout=15)
+            r = await tg_client.post("https://api.telegra.ph/createPage", data=payload, timeout=15)
             if r.status_code == 200 and r.json().get("ok"):
                 next_page_url = r.json()["result"]["url"]
                 if idx == 0:
@@ -217,8 +220,8 @@ def pick_cover(images_data: list[bytes]) -> bytes:
         return images_data[0]
 
 # ========= 爬取列表页 =========
-async def get_galleries(client):
-    r = await client.get(COSPLAY_URL)
+async def get_galleries(eh_client):
+    r = await eh_client.get(COSPLAY_URL)
     soup = BeautifulSoup(r.text, "html.parser")
     galleries = []
     seen_urls = set()
@@ -254,8 +257,8 @@ async def get_galleries(client):
     return galleries
 
 # ========= 爬取单本图集的所有图片原始直链 =========
-async def get_all_image_urls(client, base_url):
-    r = await client.get(base_url)
+async def get_all_image_urls(eh_client, base_url):
+    r = await eh_client.get(base_url)
     soup = BeautifulSoup(r.text, "html.parser")
 
     max_page = 0
@@ -270,7 +273,7 @@ async def get_all_image_urls(client, base_url):
     for i in range(actual_pages):
         url = f"{base_url}?p={i}"
         try:
-            r = await client.get(url)
+            r = await eh_client.get(url)
             soup = BeautifulSoup(r.text, "html.parser")
             thumbs = [a["href"] for a in soup.select("#gdt a")]
             all_pages.extend(thumbs)
@@ -284,7 +287,7 @@ async def get_all_image_urls(client, base_url):
         for attempt in range(3):
             try:
                 async with semaphore:
-                    r = await client.get(url)
+                    r = await eh_client.get(url)
                     soup = BeautifulSoup(r.text, "html.parser")
                     img = soup.select_one("#img")
                     if img: return img["src"]
@@ -296,17 +299,16 @@ async def get_all_image_urls(client, base_url):
     return [r for r in results if r]
 
 # ========= 全量下载并自动压缩模块 =========
-async def download_and_compress_all(client, urls):
-    """并发下载全部图片，并在内存中完成无损/低损压缩"""
+async def download_and_compress_all(eh_client, urls):
+    """并发下载全部图片，并在内存中完成压缩"""
     semaphore = asyncio.Semaphore(5)
 
     async def worker(url):
         for attempt in range(3):
             try:
                 async with semaphore:
-                    r = await client.get(url, timeout=45)
+                    r = await eh_client.get(url, timeout=45)
                     if r.status_code == 200 and len(r.content) > 5000:
-                        # 核心步骤：下载后直接在内存中执行压缩
                         return compress_image(r.content)
             except:
                 await asyncio.sleep(2)
@@ -334,9 +336,12 @@ async def main():
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
 
-    async with httpx.AsyncClient(headers=HEADERS, cookies=COOKIES, timeout=60) as client:
-        await get_or_create_telegraph_token(client)
-        galleries = await get_galleries(client)
+    # 将 EH 专属的 Header 和 Cookies 彻底隔离在 eh_client 中
+    async with httpx.AsyncClient(headers=HEADERS, cookies=COOKIES, timeout=60) as eh_client, \
+               httpx.AsyncClient(timeout=30) as tg_client:
+               
+        await get_or_create_telegraph_token(tg_client)
+        galleries = await get_galleries(eh_client)
 
         for g in galleries:
             uid = f"{g['gid']}_{g['token']}"
@@ -346,30 +351,30 @@ async def main():
 
             print(f"\n📂 正在清洗并处理: {g['title']}")
 
-            # 1. 抓取 EH 所有图片详情页中的直链 URL
-            img_urls = await get_all_image_urls(client, g["url"])
+            # 1. 抓取 EH 所有图片原始直链 URL
+            img_urls = await get_all_image_urls(eh_client, g["url"])
             if not img_urls:
                 print(f"  ⚠️ 未能解析到任何图片直链，跳过")
                 continue
             print(f"  🔗 成功捕获 {len(img_urls)} 个原始图片直链")
 
-            # 2. 并发下载并自动在内存中压缩图片
+            # 2. 并发下载并执行压缩
             print("  📥 开始高并发下载并实时执行抗上限压缩...")
-            local_images = await download_and_compress_all(client, img_urls)
+            local_images = await download_and_compress_all(eh_client, img_urls)
             if not local_images:
                 print(f"  ⚠️ 核心图片数据下载失败，跳过")
                 continue
             print(f"  💾 成功落盘并压缩 {len(local_images)} 张图片到动态内存")
 
-            # 3. 并发上传至 Telegraph
+            # 3. 并发上传至 Telegraph (传入纯净的 tg_client)
             print("  📤 开始异步分片上传至 Telegraph 服务器...")
-            telegraph_image_urls = await upload_all_images(client, local_images)
+            telegraph_image_urls = await upload_all_images(tg_client, local_images)
             if not telegraph_image_urls:
                 print(f"  ⚠️ 所有图片均上传 Telegraph 失败，跳过")
                 continue
 
             # 4. 创建 Telegraph 页面
-            telegraph_url = await create_telegraph_pages(client, g["title"], telegraph_image_urls)
+            telegraph_url = await create_telegraph_pages(tg_client, g["title"], telegraph_image_urls)
             if not telegraph_url:
                 print(f"  ⚠️ Telegraph 联页节点创建失败，跳过")
                 continue
@@ -387,7 +392,6 @@ async def main():
             except Exception as e:
                 print(f"  ❌ 推送至 TG 频道失败: {e}")
 
-            # 礼貌等待，减缓外部请求压力
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
