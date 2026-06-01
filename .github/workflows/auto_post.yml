@@ -1,46 +1,48 @@
-name: EH Cosplay → TG Auto Post
+name: EH自动并发抓取推送
 
 on:
   schedule:
-    - cron: "0 */12 * * *"
-  workflow_dispatch:
+    - cron: '0 16 * * *'   # UTC 16:00 = 北京时间 00:00（可根据需要自行调整）
+  workflow_dispatch:      # 允许你在 GitHub 页面上点击按钮手动触发
+
+concurrency:
+  group: eh-post-group
+  cancel-in-progress: false
 
 jobs:
-  post:
+  deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
-
     permissions:
-      contents: write
+      contents: write       # 必须开启此权限，否则 Actions 无法将更新后的 json 文件推回仓库
 
     steps:
-      - name: Checkout
+      - name: 拉取代码
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python
+      - name: 初始化 Python 环境
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: pip
+          python-version: '3.12'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: 安装项目依赖
+        run: |
+          pip install -r requirements.txt
 
-      - name: Run bot
+      - name: 运行主脚本
         env:
-          BOT_TOKEN:        ${{ secrets.BOT_TOKEN }}
-          MAIN_CHANNEL_ID:  ${{ secrets.MAIN_CHANNEL_ID }}
-          IMAGE_CHANNEL_ID: ${{ secrets.IMAGE_CHANNEL_ID }}
-          EH_MEMBER_ID:     ${{ secrets.EH_MEMBER_ID }}
-          EH_PASS_HASH:     ${{ secrets.EH_PASS_HASH }}
+          # 请确保这些名字与你 GitHub Repository Secrets 里配置的完全一致
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}          
+          MAIN_CHANNEL_ID: ${{ secrets.MAIN_CHANNEL_ID }}  
+          EH_MEMBER_ID: ${{ secrets.EH_MEMBER_ID }}    
+          EH_PASS_HASH: ${{ secrets.EH_PASS_HASH }}    
         run: python main.py
 
-      - name: Save sent state to repo
-        if: always()
+      - name: 持久化去重状态
+        if: success()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add sent_galleries.json
-          git diff --staged --quiet || git commit -m "chore: update sent state [skip ci]" && git push
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_galleries.json || true
+          git commit -m "chore: 定时同步已发送图集数据" || echo "没有检测到新发送的图集，跳过提交"
+          git pull --rebase origin main
+          git push
