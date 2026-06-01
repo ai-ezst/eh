@@ -28,11 +28,10 @@ EH_HEADERS = {
     "Pragma": "no-cache",
 }
 
-# 图床/Telegraph 纯净版的浏览器请求头 (洗掉 httpx 特征，防止 412)
+# 外部图床/Telegraph 纯净版的浏览器请求头
 TG_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
 }
 
 COOKIES = {
@@ -51,7 +50,7 @@ async def get_or_create_telegraph_token(tg_client):
             "author_name": "EH Cosplay Bot",
         }, timeout=15)
         if r.status_code == 200 and r.json().get("ok"):
-            TELEGRAPH_TOKEN = r.json()["result"]["access_token"]
+            TELEGRAPH_TOKEN = r.json()[\"result\"][\"access_token\"]
             print(f"✅ Telegraph 联动 Token 创建成功")
         else:
             print(f"❌ Telegraph 初始化失败: {r.text}")
@@ -90,34 +89,45 @@ def compress_image(img_bytes, max_size=1600, quality=85):
         print(f"  ⚠️ 图片处理/压缩失败，尝试返回原图: {e}")
         return img_bytes
 
-# ========= 异步上传至 Catbox 图床 =========
-async def upload_to_catbox(tg_client, img_bytes):
-    """将图片上传至对 TG 即时预览极度友好的开源图床 Catbox (已注入强力浏览器伪装)"""
-    files = {'fileToUpload': ('image.jpg', img_bytes, 'image/jpeg')}
-    data = {'reqtype': 'fileupload'}
+# ========= 异步多路容灾图床上传器 (绕过 Actions IP 封锁) =========
+async def upload_to_backup_host(tg_client, img_bytes):
+    """采用对 GitHub Actions 机房公网 IP 极为包容的两大国际免密静态图床进行灾备上传"""
+    files = {'file': ('image.jpg', img_bytes, 'image/jpeg')}
     
-    for attempt in range(3):
+    for attempt in range(2):
+        # --- 方案 A: envs.sh (高匿极简静态托管，直接返回直链文本) ---
         try:
-            r = await tg_client.post("https://catbox.moe/user/api.php", files=files, data=data, timeout=30)
-            if r.status_code == 200 and r.text.startswith("https://files.catbox.moe/"):
+            r = await tg_client.post("https://envs.sh", files=files, timeout=20)
+            if r.status_code == 200 and r.text.strip().startswith("http"):
                 return r.text.strip()
-            else:
-                print(f"    ❌ 图床响应异常: 状态码 {r.status_code}, 详情: {r.text[:100]}")
-            await asyncio.sleep(2)
-        except Exception as e:
-            print(f"    ⚠️ 图床网络重试 (第{attempt+1}次): {e}")
-            await asyncio.sleep(2)
+        except Exception:
+            pass # 悄悄失败，直接滑入备用方案
+
+        # --- 方案 B: sxcu.net (主流公开图床集群，Actions IP 未封锁，返回 JSON) ---
+        try:
+            r = await tg_client.post("https://sxcu.net/api/files/create", files=files, timeout=20)
+            if r.status_code == 200:
+                res_data = r.json()
+                if "url" in res_data:
+                    return res_data["url"]
+        except Exception:
+            pass
+            
+        await asyncio.sleep(1.5)
+        
     return None
 
 async def upload_all_images(tg_client, images_list):
-    """并发上传图集所有图片到第三方图床"""
-    semaphore = asyncio.Semaphore(2)  # 略微调低并发，防止触发图床高频防护
+    """并发上传图集所有图片到灾备图床集群"""
+    semaphore = asyncio.Semaphore(3)  # 保持 3 并发，平稳安全输出
     
     async def worker(img_bytes, idx):
         async with semaphore:
-            url = await upload_to_catbox(tg_client, img_bytes)
+            url = await upload_to_backup_host(tg_client, img_bytes)
             if url:
                 print(f"    ✨ 上传进度: [{idx+1}/{len(images_list)}] 成功 -> {url}")
+            else:
+                print(f"    ❌ 上传进度: [{idx+1}/{len(images_list)}] 节点双路熔断失败")
             return url
 
     tasks = [worker(img, i) for i, img in enumerate(images_list)]
@@ -338,7 +348,6 @@ async def main():
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
 
-    # 同时对两个 client 注入高度伪装的浏览器 Header
     async with httpx.AsyncClient(headers=EH_HEADERS, cookies=COOKIES, timeout=60) as eh_client, \
                httpx.AsyncClient(headers=TG_HEADERS, timeout=30) as tg_client:
                
@@ -368,7 +377,7 @@ async def main():
                 continue
             print(f"  💾 成功落盘并压缩 {len(local_images)} 张图片到动态内存")
 
-            # 3. 并发上传至第三方稳定匿名图床 (带纯净高匿浏览器伪装)
+            # 3. 并发上传至灾备匿名图床集群
             print("  📤 开始异步分片上传至稳定外部图床...")
             stable_image_urls = await upload_all_images(tg_client, local_images)
             if not stable_image_urls:
