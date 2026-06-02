@@ -52,59 +52,49 @@ def get_or_create_telegraph_token():
 
 
 
-def upload_image_to_telegraph(data: bytes) -> str | None:
-    """上传图片到 Telegraph，返回图片 URL"""
+async def upload_image_to_telegraph(client: httpx.AsyncClient, data: bytes) -> str | None:
     try:
         if len(data) > 5 * 1024 * 1024:
-            print(f"  ⚠️ 图片超过5MB: {round(len(data)/1024/1024,2)}MB")
+            print(f"  ⚠️ 图片超过 5MB ({len(data)//1024}KB)，跳过")
             return None
 
-        try:
-            img = Image.open(BytesIO(data))
-            fmt = (img.format or "").upper()
-            print(f"  📷 格式={fmt} 尺寸={img.size[0]}x{img.size[1]} 大小={round(len(data)/1024/1024,2)}MB")
-        except Exception as e:
-            print(f"  ❌ 不是有效图片: {e}")
-            return None
-
-        if fmt in ("JPEG", "JPG"):
-            filename = "image.jpg"
-            mime = "image/jpeg"
-        elif fmt == "PNG":
-            filename = "image.png"
-            mime = "image/png"
-        elif fmt == "GIF":
-            filename = "image.gif"
-            mime = "image/gif"
-        elif fmt == "WEBP":
-            output = BytesIO()
-            img = img.convert("RGB")
-            img.save(output, format="PNG")
-            data = output.getvalue()
-            filename = "image.png"
-            mime = "image/png"
-            print("  🔄 WEBP 转 PNG")
-        else:
-            print(f"  ❌ Telegraph不支持格式: {fmt}")
-            return None
-
-        r = requests.post(
+        # 准备文件
+        files = {"file": ("image.jpg", BytesIO(data), "image/jpeg")}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://telegra.ph/",
+        }
+        r = await client.post(
             "https://telegra.ph/upload",
-            files={"file": (filename, BytesIO(data), mime)},
-            timeout=60,
+            files=files,
+            headers=headers,
+            timeout=30,
+            follow_redirects=True  # 允许重定向
         )
-
-        print(f"  🌐 状态码: {r.status_code}")
-        print(f"  🌐 返回: {r.text}")
+        print(f"  📡 状态码: {r.status_code}")
+        print(f"  📡 响应头: {dict(r.headers)}")
+        print(f"  📡 响应内容: {r.text[:300]}")
 
         if r.status_code == 200:
-            result = r.json()
-            if isinstance(result, list) and result:
-                return "https://telegra.ph" + result[0]["src"]
-
+            try:
+                result = r.json()
+                if isinstance(result, list) and len(result) > 0:
+                    src = result[0].get("src")
+                    if src:
+                        return "https://telegra.ph" + src
+                print(f"  ⚠️ 返回结构异常: {result}")
+            except Exception as e:
+                print(f"  ⚠️ JSON 解析失败: {e}，响应原文: {r.text[:200]}")
+        else:
+            print(f"  ⚠️ 上传失败，状态码 {r.status_code}")
+            if "cloudflare" in r.text.lower():
+                print("  ⚠️ 可能被 Cloudflare 反爬拦截")
+            elif "403" in str(r.status_code):
+                print("  ⚠️ 403 Forbidden，需要模拟真实浏览器指纹")
         return None
     except Exception as e:
-        print(f"  ❌ 上传异常: {e}")
+        print(f"  ⚠️ 上传异常: {e}")
         return None
 
 
