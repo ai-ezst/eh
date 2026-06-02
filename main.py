@@ -51,44 +51,60 @@ def get_or_create_telegraph_token():
         print(f"❌ Telegraph 初始化异常: {e}")
 
 
+
 def upload_image_to_telegraph(data: bytes) -> str | None:
     """上传图片到 Telegraph，返回图片 URL"""
     try:
-        # Telegraph 图片上传限制 5MB
         if len(data) > 5 * 1024 * 1024:
-            print(f"  ⚠️ 图片超过 5MB ({len(data)//1024}KB)，跳过上传")
+            print(f"  ⚠️ 图片超过5MB: {round(len(data)/1024/1024,2)}MB")
             return None
 
-        # 1. 尝试通过 PIL 获取真实的图片格式
         try:
             img = Image.open(BytesIO(data))
-            ext = img.format.lower() if img.format else "jpeg"
-            mime_type = f"image/{ext}"
-            filename = f"image.{ext}"
-        except Exception:
-            mime_type = "image/jpeg"
-            filename = "image.jpg"
+            fmt = (img.format or "").upper()
+            print(f"  📷 格式={fmt} 尺寸={img.size[0]}x{img.size[1]} 大小={round(len(data)/1024/1024,2)}MB")
+        except Exception as e:
+            print(f"  ❌ 不是有效图片: {e}")
+            return None
 
-        # 2. 增加浏览器 User-Agent 头，防止被 Telegraph 拦截
-        upload_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://telegra.ph/"
-        }
+        if fmt in ("JPEG", "JPG"):
+            filename = "image.jpg"
+            mime = "image/jpeg"
+        elif fmt == "PNG":
+            filename = "image.png"
+            mime = "image/png"
+        elif fmt == "GIF":
+            filename = "image.gif"
+            mime = "image/gif"
+        elif fmt == "WEBP":
+            output = BytesIO()
+            img = img.convert("RGB")
+            img.save(output, format="PNG")
+            data = output.getvalue()
+            filename = "image.png"
+            mime = "image/png"
+            print("  🔄 WEBP 转 PNG")
+        else:
+            print(f"  ❌ Telegraph不支持格式: {fmt}")
+            return None
 
         r = requests.post(
             "https://telegra.ph/upload",
-            headers=upload_headers,
-            files={"file": (filename, BytesIO(data), mime_type)},
-            timeout=30,
+            files={"file": (filename, BytesIO(data), mime)},
+            timeout=60,
         )
+
+        print(f"  🌐 状态码: {r.status_code}")
+        print(f"  🌐 返回: {r.text}")
+
         if r.status_code == 200:
             result = r.json()
             if isinstance(result, list) and result:
                 return "https://telegra.ph" + result[0]["src"]
-        print(f"  ⚠️ 图片上传失败: {r.text[:80]}")
+
         return None
     except Exception as e:
-        print(f"  ⚠️ 图片上传异常: {e}")
+        print(f"  ❌ 上传异常: {e}")
         return None
 
 
