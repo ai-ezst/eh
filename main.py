@@ -29,7 +29,8 @@ HEADERS = {
 
 COOKIES = {
     "ipb_member_id": EH_MEMBER_ID,
-    "ipb_pass_hash": EH_PASS_HASH
+    "ipb_pass_hash": EH_PASS_HASH,
+    "nw": "1"
 }
 
 # ========= 状态 =========
