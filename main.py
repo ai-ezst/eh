@@ -68,7 +68,8 @@ def upload_image_to_telegraph(data: bytes) -> str | None:
             result = r.json()
             if isinstance(result, list) and result:
                 return "https://telegra.ph" + result[0]["src"]
-        print(f"  ⚠️ 图片上传失败: {r.text[:80]}")
+        print("状态码:", r.status_code)
+print("返回:", r.text)
         return None
     except Exception as e:
         print(f"  ⚠️ 图片上传异常: {e}")
