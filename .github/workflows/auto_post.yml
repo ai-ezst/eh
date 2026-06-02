@@ -1,1 +1,46 @@
+name: EH Cosplay → TG Auto Post
 
+on:
+  schedule:
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          BOT_TOKEN:        ${{ secrets.BOT_TOKEN }}
+          MAIN_CHANNEL_ID:  ${{ secrets.MAIN_CHANNEL_ID }}
+          IMAGE_CHANNEL_ID: ${{ secrets.IMAGE_CHANNEL_ID }}
+          EH_MEMBER_ID:     ${{ secrets.EH_MEMBER_ID }}
+          EH_PASS_HASH:     ${{ secrets.EH_PASS_HASH }}
+        run: python main.py
+
+      - name: Save sent state to repo
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_galleries.json
+          git diff --staged --quiet || git commit -m "chore: update sent state [skip ci]" && git push
