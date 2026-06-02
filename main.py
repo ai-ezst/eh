@@ -3,10 +3,11 @@ import json
 import asyncio
 import re
 import httpx
+import requests
 from io import BytesIO
 from PIL import Image
 from bs4 import BeautifulSoup
-from telegram import Bot, InputMediaPhoto
+from telegram import Bot
 from telegram.constants import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -20,7 +21,7 @@ COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
 MAX_PAGES = 20
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0",
     "Referer": "https://e-hentai.org/",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
@@ -31,35 +32,79 @@ COOKIES = {
     "ipb_pass_hash": EH_PASS_HASH
 }
 
-# ========= 新增：获取 Torrent 下载链接 =========
-async def get_torrent_url(client, base_url):
-    """从画廊页面抓取 Torrent 下载链接"""
+TELEGRAPH_TOKEN = None
+
+# ========= Telegraph =========
+def get_or_create_telegraph_token():
+    global TELEGRAPH_TOKEN
     try:
-        r = await client.get(base_url)
-        soup = BeautifulSoup(r.text, "html.parser")
+        r = requests.post("https://api.telegra.ph/createAccount", json={
+            "short_name": "EHBot",
+            "author_name": "EH Cosplay Bot",
+        }, timeout=15)
+        if r.status_code == 200 and r.json().get("ok"):
+            TELEGRAPH_TOKEN = r.json()["result"]["access_token"]
+            print(f"✅ Telegraph token 创建成功")
+        else:
+            print(f"❌ Telegraph token 创建失败: {r.text}")
+    except Exception as e:
+        print(f"❌ Telegraph 初始化异常: {e}")
 
-        # 优先匹配 ehtracker.org 的种子链接（最准确）
-        for a in soup.select('a[href*="ehtracker.org/get/"]'):
-            href = a.get("href", "")
-            if href.startswith("http"):
-                print(f"  📥 找到 Torrent: {href}")
-                return href
 
-        # 备用：查找文字包含 Torrent Download 的链接
-        for a in soup.find_all("a"):
-            text = a.get_text(strip=True).lower()
-            if "torrent" in text:
-                href = a.get("href", "")
-                if href and "download" in text:
-                    if not href.startswith("http"):
-                        href = "https://e-hentai.org" + href
-                    print(f"  📥 找到 Torrent: {href}")
-                    return href
+def upload_image_to_telegraph(data: bytes) -> str | None:
+    """上传图片到 Telegraph，返回图片 URL"""
+    try:
+        # Telegraph 图片上传限制 5MB
+        if len(data) > 5 * 1024 * 1024:
+            print(f"  ⚠️ 图片超过 5MB ({len(data)//1024}KB)，跳过上传")
+            return None
 
-        print("  ⚠️ 未找到 Torrent 链接（该画廊可能没有种子）")
+        r = requests.post(
+            "https://telegra.ph/upload",
+            files={"file": ("image.jpg", BytesIO(data), "image/jpeg")},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            result = r.json()
+            if isinstance(result, list) and result:
+                return "https://telegra.ph" + result[0]["src"]
+        print(f"  ⚠️ 图片上传失败: {r.text[:80]}")
         return None
     except Exception as e:
-        print(f"  ⚠️ 获取 Torrent 失败: {e}")
+        print(f"  ⚠️ 图片上传异常: {e}")
+        return None
+
+
+def create_telegraph_page(title, telegraph_image_urls):
+    """用已上传到 Telegraph 的图片 URL 创建页面"""
+    if not TELEGRAPH_TOKEN:
+        print("  ⚠️ 无 Telegraph token，跳过")
+        return None
+
+    children = [{"tag": "img", "attrs": {"src": url}} for url in telegraph_image_urls]
+    print(f"  📝 创建 Telegraph 页面，共 {len(children)} 张图片")
+
+    try:
+        payload = {
+            "access_token": TELEGRAPH_TOKEN,
+            "title": title[:256],
+            "content": json.dumps(children, ensure_ascii=False),
+            "return_content": "false",
+        }
+        r = requests.post(
+            "https://api.telegra.ph/createPage",
+            data=payload,
+            timeout=15,
+        )
+        if r.status_code == 200 and r.json().get("ok"):
+            url = r.json()["result"]["url"]
+            print(f"  ✅ Telegraph 页面: {url}")
+            return url
+        else:
+            print(f"  ❌ Telegraph 页面创建失败: {r.text[:120]}")
+            return None
+    except Exception as e:
+        print(f"  ❌ Telegraph 异常: {e}")
         return None
 
 
@@ -181,7 +226,7 @@ async def get_all_image_urls(client, base_url):
             soup = BeautifulSoup(r.text, "html.parser")
             thumbs = [a["href"] for a in soup.select("#gdt a")]
             all_pages.extend(thumbs)
-            print(f"  第{i}页: {len(thumbs)} 张图片页")
+            print(f"  第{i}页: {len(thumbs)}")
             await asyncio.sleep(1)
         except Exception as e:
             print(f"  ⚠️ 第{i}页抓取失败: {e}")
@@ -191,122 +236,97 @@ async def get_all_image_urls(client, base_url):
 
     semaphore = asyncio.Semaphore(3)
 
-    async def fetch_img_url(page_url):
+    async def fetch_img_url(url):
         for attempt in range(3):
             try:
                 async with semaphore:
-                    r = await client.get(page_url)
+                    r = await client.get(url)
                     soup = BeautifulSoup(r.text, "html.parser")
                     img = soup.select_one("#img")
-                    if img and img.get("src"):
-                        return img["src"], page_url
+                    if img:
+                        return img["src"]
             except Exception as e:
                 print(f"  ⚠️ 图片页抓取失败 (第{attempt+1}次): {e}")
                 await asyncio.sleep(3)
-        return None, page_url
+        return None
 
     results = await asyncio.gather(*[fetch_img_url(u) for u in all_pages])
-    valid_pairs = [r for r in results if r[0]]
-    print(f"✅ 成功获取 {len(valid_pairs)} 个图片直链")
-    return valid_pairs
+    return [r for r in results if r]
 
 
 # ========= 下载单张图片 =========
-async def download_one(client, url: str, referer: str | None = None) -> bytes | None:
+async def download_one(client, url) -> bytes | None:
     for attempt in range(3):
         try:
-            if referer:
-                r = await client.get(url, headers={"Referer": referer}, timeout=30)
-            else:
-                r = await client.get(url, timeout=30)
-
-            if r.status_code != 200:
-                continue
-
-            data = r.content
-            if not (5000 < len(data) < 10 * 1024 * 1024):
-                continue
-
-            try:
-                img = Image.open(BytesIO(data))
-                img.verify()
-                fmt = img.format or "Unknown"
-                print(f"  ✅ 第{attempt+1}次下载成功，有效图片 ({len(data)//1024}KB, {fmt})")
-                return data
-            except Exception as e:
-                print(f"  ❌ 第{attempt+1}次 下载的不是有效图片: {e}")
-                continue
-
+            r = await client.get(url, timeout=30)
+            if r.status_code == 200 and 5000 < len(r.content) < 10 * 1024 * 1024:
+                return r.content
         except Exception as e:
             print(f"  ⚠️ 下载失败 (第{attempt+1}次): {e}")
             await asyncio.sleep(3)
     return None
 
 
-# ========= 下载所有图片 =========
-async def download_all_images(client, image_pairs: list[tuple[str, str]]) -> list[bytes]:
-    images = []
-    total = len(image_pairs)
-    for i, (url, referer) in enumerate(image_pairs):
-        data = await download_one(client, url, referer=referer)
-        if data:
-            images.append(data)
-            print(f"  📥 {i+1}/{total} 下载完成")
+# ========= 下载并上传所有图片到 Telegraph =========
+async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]:
+    """
+    逐张下载 → 上传 Telegraph → 释放内存
+    返回：(telegraph_urls, 前20张的原始数据用于选封面)
+    """
+    telegraph_urls = []
+    cover_candidates = []  # 只保留前20张原始数据用于选封面
+
+    total = len(urls)
+    for i, url in enumerate(urls):
+        data = await download_one(client, url)
+        if not data:
+            print(f"  ⚠️ 第{i+1}/{total}张下载失败，跳过")
+            continue
+
+        # 保留前20张原始数据用于选封面
+        if len(cover_candidates) < 20:
+            cover_candidates.append(data)
+
+        # 上传到 Telegraph
+        tg_url = upload_image_to_telegraph(data)
+        if tg_url:
+            telegraph_urls.append(tg_url)
+            print(f"  ⬆️ {i+1}/{total} 上传成功")
         else:
-            print(f"  ⚠️ {i+1}/{total} 下载失败，跳过")
-        await asyncio.sleep(0.3)
-    return images
+            print(f"  ⚠️ {i+1}/{total} 上传失败，跳过")
+
+        # 立即释放内存
+        del data
+        await asyncio.sleep(0.5)
+
+    return telegraph_urls, cover_candidates
 
 
-# ========= 发送媒体组（每10张一组） =========
-async def send_media_groups(bot, chat_id: int, images: list[bytes], title: str):
-    if not images:
-        return
-    media_groups = [images[i:i+10] for i in range(0, len(images), 10)]
-    for idx, group in enumerate(media_groups):
-        media = [InputMediaPhoto(BytesIO(img)) for img in group]
-        caption = f"{title}（{idx+1}/{len(media_groups)}）" if idx == 0 else None
-        await bot.send_media_group(
-            chat_id=chat_id,
-            media=media,
-            caption=caption,
-            parse_mode=ParseMode.HTML
-        )
-        print(f"  ✅ 已发送第 {idx+1}/{len(media_groups)} 组（{len(group)} 张）")
-        await asyncio.sleep(1)
-
-
-# ========= 发封面 + 图集 + Torrent 链接 =========
-async def send_gallery(bot, cover: bytes, title: str, all_images: list[bytes], torrent_url: str | None):
+# ========= 发封面到频道 =========
+async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
     caption = (
         f"<b>{title}</b>\n\n"
-        f"📸 共 {len(all_images)} 张图片\n"
-        f"👇 向下滑动查看完整图集"
+        f"<a href='{telegraph_url}'>👉 查看全部图片 / View Full Gallery</a>"
     )
-    if torrent_url:
-        caption += f"\n\n📥 <a href='{torrent_url}'>Torrent Download（完整原图包）</a>"
-
     await bot.send_photo(
         chat_id=MAIN_CHANNEL,
-        photo=cover,
+        photo=image,
         caption=caption,
         parse_mode=ParseMode.HTML
     )
 
-    await send_media_groups(bot, MAIN_CHANNEL, all_images, title)
-    print(f"  ✅ 完整图集 + Torrent 链接发送完成！")
-
 
 # ========= 主流程 =========
 async def main():
+    get_or_create_telegraph_token()
+
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
 
     async with httpx.AsyncClient(
         headers=HEADERS,
         cookies=COOKIES,
-        timeout=60,
-        follow_redirects=True
+        timeout=60
     ) as client:
 
         galleries = await get_galleries(client)
@@ -318,35 +338,55 @@ async def main():
                 print(f"⏭️ 跳过已发: {g['title']}")
                 continue
 
-            print(f"\n🚀 开始处理: {g['title']}")
+            print(f"\n处理: {g['title']}")
 
-            # 1. 抓图片直链
-            image_pairs = await get_all_image_urls(client, g["url"])
-            if not image_pairs:
+            # 抓所有图片直链
+            urls = await get_all_image_urls(client, g["url"])
+            if not urls:
                 print(f"  ⚠️ 未抓到图片 URL，跳过")
                 seen.add(uid)
                 save_seen(seen)
                 continue
 
-            # 2. 抓 Torrent 链接
-            torrent_url = await get_torrent_url(client, g["url"])
+            print(f"  🔗 共获取 {len(urls)} 个图片 URL")
 
-            # 3. 下载所有图片
-            all_images = await download_all_images(client, image_pairs)
-            if not all_images:
-                print(f"  ⚠️ 没有图片下载成功，跳过")
+            # 逐张下载并上传到 Telegraph
+            telegraph_urls, cover_candidates = await download_and_upload_all(client, urls)
+
+            if not telegraph_urls:
+                print(f"  ⚠️ 没有图片上传成功，跳过")
                 seen.add(uid)
                 save_seen(seen)
                 continue
 
-            # 4. 选封面并发送
-            cover = pick_cover(all_images[:20])
-            await send_gallery(bot, cover, g["title"], all_images, torrent_url)
+            print(f"  ✅ 成功上传 {len(telegraph_urls)}/{len(urls)} 张到 Telegraph")
+
+            # 创建 Telegraph 页面
+            telegraph_url = create_telegraph_page(g["title"], telegraph_urls)
+            if not telegraph_url:
+                print(f"  ⚠️ Telegraph 页面创建失败，跳过")
+                seen.add(uid)
+                save_seen(seen)
+                continue
+
+            # 从前20张里选封面
+            if not cover_candidates:
+                print(f"  ⚠️ 无封面候选，跳过")
+                seen.add(uid)
+                save_seen(seen)
+                continue
+
+            cover = pick_cover(cover_candidates)
+
+            # 发封面到频道
+            await send_cover(bot, cover, g["title"], telegraph_url)
+            print(f"  ✅ 发送完成: {g['title']}")
 
             seen.add(uid)
             save_seen(seen)
 
-            print(f"\n✅ 本次运行完成（已处理 1 个图集），下次运行继续剩余图集")
-            break  # 每次只处理 1 个，防止超时
+            # 每次只处理1个新图集，下次运行继续处理剩余的
+            print(f"\n✅ 本次运行完成，下次运行继续处理剩余图集")
+            break
 
 asyncio.run(main())
