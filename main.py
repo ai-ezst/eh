@@ -34,12 +34,32 @@ COOKIES = {
 
 # ========= 状态 =========
 def load_seen():
+    """读取已发送记录，文件损坏时自动重置"""
     if not os.path.exists(STATE_FILE):
         return set()
-    return set(json.load(open(STATE_FILE)))
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # 确保数据是列表格式
+            if not isinstance(data, list):
+                return set()
+            return set(data)
+    except (json.JSONDecodeError, IOError) as e:
+        # 文件损坏时备份并重新创建
+        print(f"⚠️ 读取状态文件失败: {e}，将重置记录")
+        backup_name = STATE_FILE + ".bak"
+        try:
+            if os.path.exists(STATE_FILE):
+                os.rename(STATE_FILE, backup_name)
+                print(f"   已备份损坏文件为: {backup_name}")
+        except:
+            pass
+        return set()
 
 def save_seen(seen):
-    json.dump(list(seen), open(STATE_FILE, "w"))
+    """安全写入已发送记录"""
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(seen), f, indent=2)
 
 # ========= 标题清洗 =========
 def clean_title(title):
