@@ -59,17 +59,33 @@ def upload_image_to_telegraph(data: bytes) -> str | None:
             print(f"  ⚠️ 图片超过 5MB ({len(data)//1024}KB)，跳过上传")
             return None
 
+        # 1. 尝试通过 PIL 获取真实的图片格式
+        try:
+            img = Image.open(BytesIO(data))
+            ext = img.format.lower() if img.format else "jpeg"
+            mime_type = f"image/{ext}"
+            filename = f"image.{ext}"
+        except Exception:
+            mime_type = "image/jpeg"
+            filename = "image.jpg"
+
+        # 2. 增加浏览器 User-Agent 头，防止被 Telegraph 拦截
+        upload_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://telegra.ph/"
+        }
+
         r = requests.post(
             "https://telegra.ph/upload",
-            files={"file": ("image.jpg", BytesIO(data), "image/jpeg")},
+            headers=upload_headers,
+            files={"file": (filename, BytesIO(data), mime_type)},
             timeout=30,
         )
         if r.status_code == 200:
             result = r.json()
             if isinstance(result, list) and result:
                 return "https://telegra.ph" + result[0]["src"]
-        print("状态码:", r.status_code)
-print("返回:", r.text)
+        print(f"  ⚠️ 图片上传失败: {r.text[:80]}")
         return None
     except Exception as e:
         print(f"  ⚠️ 图片上传异常: {e}")
