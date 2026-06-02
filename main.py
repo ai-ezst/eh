@@ -21,7 +21,7 @@ COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
 MAX_PAGES = 20
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
     "Referer": "https://e-hentai.org/",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
@@ -51,50 +51,59 @@ def get_or_create_telegraph_token():
         print(f"❌ Telegraph 初始化异常: {e}")
 
 
-
-async def upload_image_to_telegraph(client: httpx.AsyncClient, data: bytes) -> str | None:
+def upload_image_to_telegraph(data: bytes) -> str | None:
+    """上传图片到 Telegraph，返回图片 URL（已优化格式检测 + 错误提示）"""
     try:
+        # Telegraph 图片上传限制 5MB
         if len(data) > 5 * 1024 * 1024:
-            print(f"  ⚠️ 图片超过 5MB ({len(data)//1024}KB)，跳过")
+            print(f"  ⚠️ 图片超过 5MB ({len(data)//1024}KB)，跳过上传")
             return None
 
-        # 准备文件
-        files = {"file": ("image.jpg", BytesIO(data), "image/jpeg")}
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://telegra.ph/",
-        }
-        r = await client.post(
-            "https://telegra.ph/upload",
-            files=files,
-            headers=headers,
-            timeout=30,
-            follow_redirects=True  # 允许重定向
-        )
-        print(f"  📡 状态码: {r.status_code}")
-        print(f"  📡 响应头: {dict(r.headers)}")
-        print(f"  📡 响应内容: {r.text[:300]}")
+        # 自动识别真实图片格式（防止上传非图片文件）
+        try:
+            img = Image.open(BytesIO(data))
+            fmt = (img.format or "JPEG").lower()
+            ext = "jpg" if fmt in ("jpeg", "jpg") else fmt
+            mime = f"image/{fmt}" if fmt != "jpeg" else "image/jpeg"
+            filename = f"image.{ext}"
+        except Exception:
+            filename = "image.jpg"
+            mime = "image/jpeg"
 
-        if r.status_code == 200:
-            try:
-                result = r.json()
-                if isinstance(result, list) and len(result) > 0:
-                    src = result[0].get("src")
-                    if src:
-                        return "https://telegra.ph" + src
-                print(f"  ⚠️ 返回结构异常: {result}")
-            except Exception as e:
-                print(f"  ⚠️ JSON 解析失败: {e}，响应原文: {r.text[:200]}")
+        print(f"  📤 正在上传... 格式: {filename} ({len(data)//1024}KB)")
+
+        r = requests.post(
+            "https://telegra.ph/upload",
+            files={"file": (filename, BytesIO(data), mime)},
+            timeout=30,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://telegra.ph/",
+                "Accept": "*/*",
+            }
+        )
+
+        if r.status_code != 200:
+            print(f"  ❌ HTTP {r.status_code}: {r.text[:200]}")
+            return None
+
+        # 更健壮的响应解析
+        try:
+            result = r.json()
+        except:
+            result = None
+
+        if isinstance(result, list) and result and isinstance(result[0], dict) and "src" in result[0]:
+            url = "https://telegra.ph" + result[0]["src"]
+            print(f"  ✅ 上传成功: {url}")
+            return url
         else:
-            print(f"  ⚠️ 上传失败，状态码 {r.status_code}")
-            if "cloudflare" in r.text.lower():
-                print("  ⚠️ 可能被 Cloudflare 反爬拦截")
-            elif "403" in str(r.status_code):
-                print("  ⚠️ 403 Forbidden，需要模拟真实浏览器指纹")
-        return None
+            error_msg = r.text[:300] if r.text else str(result)
+            print(f"  ❌ Telegraph 拒绝: {error_msg}")
+            return None
+
     except Exception as e:
-        print(f"  ⚠️ 上传异常: {e}")
+        print(f"  ⚠️ 图片上传异常: {e}")
         return None
 
 
@@ -226,7 +235,7 @@ async def get_galleries(client):
     return galleries
 
 
-# ========= 抓图集所有图片直链 =========
+# ========= 抓图集所有图片直链（关键修复：同时返回直链 + Referer） =========
 async def get_all_image_urls(client, base_url):
     r = await client.get(base_url)
     soup = BeautifulSoup(r.text, "html.parser")
@@ -241,7 +250,7 @@ async def get_all_image_urls(client, base_url):
     actual_pages = min(max_page + 1, MAX_PAGES)
     print(f"📄 页数: {max_page+1}，实际抓取: {actual_pages} 页")
 
-    all_pages = []
+    all_pages = []  # 图片详情页（/s/xxxx）链接
     for i in range(actual_pages):
         url = f"{base_url}?p={i}"
         try:
@@ -249,7 +258,7 @@ async def get_all_image_urls(client, base_url):
             soup = BeautifulSoup(r.text, "html.parser")
             thumbs = [a["href"] for a in soup.select("#gdt a")]
             all_pages.extend(thumbs)
-            print(f"  第{i}页: {len(thumbs)}")
+            print(f"  第{i}页: {len(thumbs)} 张图片页")
             await asyncio.sleep(1)
         except Exception as e:
             print(f"  ⚠️ 第{i}页抓取失败: {e}")
@@ -259,31 +268,60 @@ async def get_all_image_urls(client, base_url):
 
     semaphore = asyncio.Semaphore(3)
 
-    async def fetch_img_url(url):
+    async def fetch_img_url(page_url):
+        """从图片详情页提取直链，并返回 (直链, 详情页URL) 用于后续下载时设置 Referer"""
         for attempt in range(3):
             try:
                 async with semaphore:
-                    r = await client.get(url)
+                    r = await client.get(page_url)
                     soup = BeautifulSoup(r.text, "html.parser")
                     img = soup.select_one("#img")
-                    if img:
-                        return img["src"]
+                    if img and img.get("src"):
+                        direct_url = img["src"]
+                        return direct_url, page_url
             except Exception as e:
                 print(f"  ⚠️ 图片页抓取失败 (第{attempt+1}次): {e}")
                 await asyncio.sleep(3)
-        return None
+        return None, page_url
 
     results = await asyncio.gather(*[fetch_img_url(u) for u in all_pages])
-    return [r for r in results if r]
+    valid_pairs = [r for r in results if r[0]]  # 只保留成功提取到直链的 (direct_url, referer_page)
+    print(f"✅ 成功获取 {len(valid_pairs)} 个图片直链")
+    return valid_pairs
 
 
-# ========= 下载单张图片 =========
-async def download_one(client, url) -> bytes | None:
+# ========= 下载单张图片（关键修复：带 Referer + 严格图片校验） =========
+async def download_one(client, url: str, referer: str | None = None) -> bytes | None:
+    """下载图片 + 立即校验是否为有效图片"""
     for attempt in range(3):
         try:
-            r = await client.get(url, timeout=30)
-            if r.status_code == 200 and 5000 < len(r.content) < 10 * 1024 * 1024:
-                return r.content
+            # 关键：为每张图片单独设置正确的 Referer（E-Hentai 图片服务器防盗链）
+            if referer:
+                r = await client.get(url, headers={"Referer": referer}, timeout=30)
+            else:
+                r = await client.get(url, timeout=30)
+
+            if r.status_code != 200:
+                print(f"  ⚠️ 第{attempt+1}次 HTTP {r.status_code}")
+                continue
+
+            data = r.content
+            if not (5000 < len(data) < 10 * 1024 * 1024):
+                print(f"  ⚠️ 第{attempt+1}次 大小异常 ({len(data)//1024}KB)")
+                continue
+
+            # ================== 严格校验是否真是图片 ==================
+            try:
+                img = Image.open(BytesIO(data))
+                img.verify()          # 验证图片文件完整性
+                fmt = img.format or "Unknown"
+                print(f"  ✅ 第{attempt+1}次下载成功，有效图片 ({len(data)//1024}KB, {fmt})")
+                return data
+            except Exception as e:
+                print(f"  ❌ 第{attempt+1}次 下载的不是有效图片（可能是错误页）: {e}")
+                continue
+            # ============================================================
+
         except Exception as e:
             print(f"  ⚠️ 下载失败 (第{attempt+1}次): {e}")
             await asyncio.sleep(3)
@@ -291,19 +329,20 @@ async def download_one(client, url) -> bytes | None:
 
 
 # ========= 下载并上传所有图片到 Telegraph =========
-async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]:
+async def download_and_upload_all(client, image_pairs: list[tuple[str, str]]) -> tuple[list[str], list[bytes]]:
     """
     逐张下载 → 上传 Telegraph → 释放内存
+    image_pairs: list[(direct_url, referer_page_url)]
     返回：(telegraph_urls, 前20张的原始数据用于选封面)
     """
     telegraph_urls = []
     cover_candidates = []  # 只保留前20张原始数据用于选封面
 
-    total = len(urls)
-    for i, url in enumerate(urls):
-        data = await download_one(client, url)
+    total = len(image_pairs)
+    for i, (url, referer) in enumerate(image_pairs):
+        data = await download_one(client, url, referer=referer)
         if not data:
-            print(f"  ⚠️ 第{i+1}/{total}张下载失败，跳过")
+            print(f"  ⚠️ 第{i+1}/{total}张下载失败或无效，跳过")
             continue
 
         # 保留前20张原始数据用于选封面
@@ -349,7 +388,8 @@ async def main():
     async with httpx.AsyncClient(
         headers=HEADERS,
         cookies=COOKIES,
-        timeout=60
+        timeout=60,
+        follow_redirects=True
     ) as client:
 
         galleries = await get_galleries(client)
@@ -363,18 +403,18 @@ async def main():
 
             print(f"\n处理: {g['title']}")
 
-            # 抓所有图片直链
-            urls = await get_all_image_urls(client, g["url"])
-            if not urls:
-                print(f"  ⚠️ 未抓到图片 URL，跳过")
+            # 抓所有图片直链（现在返回的是 (直链, Referer) 对）
+            image_pairs = await get_all_image_urls(client, g["url"])
+            if not image_pairs:
+                print(f"  ⚠️ 未抓到任何图片 URL，跳过")
                 seen.add(uid)
                 save_seen(seen)
                 continue
 
-            print(f"  🔗 共获取 {len(urls)} 个图片 URL")
+            print(f"  🔗 共获取 {len(image_pairs)} 个图片 URL")
 
             # 逐张下载并上传到 Telegraph
-            telegraph_urls, cover_candidates = await download_and_upload_all(client, urls)
+            telegraph_urls, cover_candidates = await download_and_upload_all(client, image_pairs)
 
             if not telegraph_urls:
                 print(f"  ⚠️ 没有图片上传成功，跳过")
@@ -382,7 +422,7 @@ async def main():
                 save_seen(seen)
                 continue
 
-            print(f"  ✅ 成功上传 {len(telegraph_urls)}/{len(urls)} 张到 Telegraph")
+            print(f"  ✅ 成功上传 {len(telegraph_urls)}/{len(image_pairs)} 张到 Telegraph")
 
             # 创建 Telegraph 页面
             telegraph_url = create_telegraph_page(g["title"], telegraph_urls)
