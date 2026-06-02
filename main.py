@@ -2,26 +2,34 @@ import os
 import json
 import asyncio
 import re
+import logging
 import httpx
 from io import BytesIO
 from PIL import Image
 from bs4 import BeautifulSoup
 from telegram import Bot, InputMediaPhoto
 from telegram.constants import ParseMode
+from telegram.error import RetryAfter, TimedOut, BadRequest
 
+# ====================== 配置 ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
-IMAGE_CHANNEL = os.getenv("IMAGE_CHANNEL_ID")
+MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")      # 主频道（发封面 + 链接）
+IMAGE_CHANNEL = os.getenv("IMAGE_CHANNEL_ID")    # 图组频道（发全部图片）
 
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
 
 STATE_FILE = "sent_galleries.json"
-COSPLAY_URL = "https://e-hentai.org/?f_cats=959&sort=1&order=d"  # sort=1 按上传时间，order=d 降序（最新在前）
-MAX_PAGES = 20  # 每个图集最多抓 20 页（约 800 张），避免触碰免费账号 960 张上限
+COSPLAY_URL = "https://e-hentai.org/?f_cats=959&sort=1&order=d"  # 最新 cosplay 图集
+
+MAX_PAGES_PER_GALLERY = 20      # 每个图集最多抓 20 页（约 800 张）
+MAX_GALLERY_PAGES = 8           # 首页最多翻 8 页（遇到已发就立刻停止）
+MAX_ASPECT_RATIO = 19.5         # Telegram 限制 20:1，留一点余量
+DOWNLOAD_SEMAPHORE = 3
+PAGE_SEMAPHORE = 3
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer": "https://e-hentai.org/",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
@@ -29,53 +37,69 @@ HEADERS = {
 
 COOKIES = {
     "ipb_member_id": EH_MEMBER_ID,
-    "ipb_pass_hash": EH_PASS_HASH
+    "ipb_pass_hash": EH_PASS_HASH,
 }
 
-# ========= 状态 =========
-def load_seen():
+# ====================== 日志 ======================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# ====================== 状态管理 ======================
+def load_seen() -> set:
     if not os.path.exists(STATE_FILE):
         return set()
-    return set(json.load(open(STATE_FILE)))
+    try:
+        return set(json.load(open(STATE_FILE, encoding="utf-8")))
+    except Exception as e:
+        logger.error(f"加载 seen 状态失败: {e}")
+        return set()
 
-def save_seen(seen):
-    json.dump(list(seen), open(STATE_FILE, "w"))
 
-# ========= 标题清洗 =========
-def clean_title(title):
+def save_seen(seen: set):
+    try:
+        json.dump(list(seen), open(STATE_FILE, "w", encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"保存 seen 状态失败: {e}")
+
+
+# ====================== 标题清洗 ======================
+def clean_title(title: str) -> str:
     title = re.sub(r'\[.*?\]', '', title)
     title = re.sub(r'f:[^ ]+', '', title)
     title = re.sub(r'\s+', ' ', title)
     return title.strip()
 
-# ========= 过滤图片尺寸 =========
-def is_safe_for_telegram(data: bytes) -> bool:
-    """检查图片宽高比是否在 Telegram 允许范围内（不超过 20:1）"""
+
+# ====================== 图片尺寸过滤 ======================
+def is_valid_image(data: bytes) -> bool:
+    """检查图片宽高比是否 ≤ 19.5:1（Telegram 安全范围）"""
     try:
         img = Image.open(BytesIO(data))
         w, h = img.size
         if w == 0 or h == 0:
             return False
         ratio = max(w, h) / min(w, h)
-        return ratio <= 19  # 留一点余量，不要贴着 20:1 的上限
-    except:
-        return True  # 解析失败就放行，让 Telegram 自己决定
+        return ratio <= MAX_ASPECT_RATIO
+    except Exception:
+        return True  # 解析失败就放行，让 Telegram 自行处理
 
-def filter_safe_images(images: list[bytes]) -> list[bytes]:
-    """过滤掉比例太极端的图片，避免 photo_invalid_dimensions"""
-    safe = [img for img in images if is_safe_for_telegram(img)]
-    skipped = len(images) - len(safe)
+
+def filter_valid_images(images: list[bytes]) -> list[bytes]:
+    """过滤极端比例图片"""
+    valid = [img for img in images if is_valid_image(img)]
+    skipped = len(images) - len(valid)
     if skipped:
-        print(f"  ⚠️ 过滤掉 {skipped} 张比例异常的图片")
-    return safe
+        logger.warning(f"  ⚠️ 过滤掉 {skipped} 张极端比例图片")
+    return valid
 
-# ========= 选最佳封面 =========
+
+# ====================== 最佳封面选择 ======================
 def pick_cover(images: list[bytes]) -> bytes:
-    """
-    从图片列表中挑选最佳封面：
-    1. 优先选竖图（高 > 宽）且宽高比在 1:1.2 ~ 1:3 之间（Telegram 安全范围）
-    2. 若没有合适竖图，选所有图里文件最大的
-    """
+    """优先选竖图（高>宽 且 比例 1.2~3.0），没有则选文件最大的"""
     portrait = []
     all_imgs = []
 
@@ -85,231 +109,249 @@ def pick_cover(images: list[bytes]) -> bytes:
             w, h = img.size
             if w == 0 or h == 0:
                 continue
-            ratio = h / w
             size = len(data)
             all_imgs.append((size, data))
+
+            ratio = h / w
             if h > w and 1.2 <= ratio <= 3.0:
                 portrait.append((size, data))
-        except Exception as e:
-            print(f"  ⚠️ 无法解析图片尺寸: {e}")
+        except Exception:
             continue
 
     if portrait:
-        print(f"  📐 找到 {len(portrait)} 张合适竖图，选最大的作封面")
+        logger.info(f"  📐 找到 {len(portrait)} 张合适竖图，选最大的作封面")
         return max(portrait, key=lambda x: x[0])[1]
-    elif all_imgs:
-        print(f"  ⚠️ 没有合适竖图，从所有图中选最大的作封面")
+    if all_imgs:
+        logger.info(f"  ⚠️ 没有合适竖图，从所有图中选最大的作封面")
         return max(all_imgs, key=lambda x: x[0])[1]
-    else:
-        print(f"  ⚠️ 无法解析任何图片，使用第一张作封面")
-        return images[0]
+    logger.warning(f"  ⚠️ 无法解析任何图片，使用第一张作封面")
+    return images[0]
 
-# ========= 抓首页 =========
-async def get_galleries(client):
-    r = await client.get(COSPLAY_URL)
-    soup = BeautifulSoup(r.text, "html.parser")
 
+# ====================== 抓取新图集（分页 + 提前停止） ======================
+async def get_new_galleries(client: httpx.AsyncClient, seen: set) -> list[dict]:
     galleries = []
-
-    # ?f_cats=959 是标准图库列表页，每个图集入口是带 /g/ 的链接
-    # 兼容两种布局：.gl1t（大图模式）和 .gl2c（列表模式）
     seen_urls = set()
-    for a in soup.select("a[href*='/g/']"):
-        href = a.get("href", "")
-        m = re.search(r"/g/(\d+)/([a-f0-9]+)/", href)
-        if not m:
-            continue
-        if href in seen_urls:
-            continue
-        seen_urls.add(href)
 
-        # 标题在 .glink 里，找最近的祖先容器
-        title_node = a.select_one(".glink") or a.find(class_="glink")
-        if not title_node:
-            # 往上找
-            parent = a.parent
-            for _ in range(5):
-                if not parent:
-                    break
-                title_node = parent.select_one(".glink")
-                if title_node:
-                    break
-                parent = parent.parent
-
-        if not title_node:
-            continue
-
-        title = clean_title(title_node.text)
-        if not title:
-            continue
-
-        galleries.append({
-            "gid": m.group(1),
-            "token": m.group(2),
-            "url": href,
-            "title": title
-        })
-
-    print(f"  📋 共找到 {len(galleries)} 个图集")
-    return galleries  # 返回全部找到的图集，不限制数量
-
-# ========= 抓全部分页 =========
-async def get_all_images(client, base_url):
-    r = await client.get(base_url)
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    max_page = 0
-    for a in soup.select(".ptt a"):
+    for page in range(MAX_GALLERY_PAGES):
+        url = f"{COSPLAY_URL}&p={page}" if page > 0 else COSPLAY_URL
         try:
-            max_page = max(max_page, int(a.text))
-        except:
-            pass
+            r = await client.get(url, timeout=30)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")   # 可换成 "lxml" 更快
 
-    actual_pages = min(max_page + 1, MAX_PAGES)
-    print(f"📄 页数: {max_page+1}，实际抓取: {actual_pages} 页")
+            new_in_page = False
+            for a in soup.select("a[href*='/g/']"):
+                href = a.get("href", "")
+                m = re.search(r"/g/(\d+)/([a-f0-9]+)/", href)
+                if not m:
+                    continue
+                uid = m.group(1) + "_" + m.group(2)
 
-    all_pages = []
+                if uid in seen:
+                    logger.info(f"  ✅ 遇到已发送图集，停止翻页")
+                    return galleries  # 直接停止（因为是最新排序）
 
-    for i in range(actual_pages):
-        url = f"{base_url}?p={i}"
-        try:
-            r = await client.get(url)
-            soup = BeautifulSoup(r.text, "html.parser")
+                if href in seen_urls:
+                    continue
+                seen_urls.add(href)
 
-            thumbs = [a["href"] for a in soup.select("#gdt a")]
-            all_pages.extend(thumbs)
+                # 提取标题
+                title_node = a.select_one(".glink") or a.find(class_="glink")
+                if not title_node:
+                    parent = a.parent
+                    for _ in range(5):
+                        if not parent:
+                            break
+                        title_node = parent.select_one(".glink")
+                        if title_node:
+                            break
+                        parent = parent.parent
+                if not title_node:
+                    continue
 
-            print(f"  第{i}页: {len(thumbs)}")
+                title = clean_title(title_node.text)
+                if not title:
+                    continue
 
-            await asyncio.sleep(1)
+                galleries.append({
+                    "gid": m.group(1),
+                    "token": m.group(2),
+                    "url": href,
+                    "title": title,
+                    "uid": uid,
+                })
+                new_in_page = True
+
+            logger.info(f"  📋 第 {page + 1} 页找到 {len(galleries) - len(galleries) + (len([g for g in galleries if g['uid'] not in seen]))} 个新图集")  # 简化日志
+
+            if not new_in_page:
+                break
+
+            await asyncio.sleep(1.5)
         except Exception as e:
-            print(f"  ⚠️ 第{i}页抓取失败: {e}")
+            logger.error(f"  ⚠️ 抓取第 {page + 1} 页失败: {e}")
             continue
 
-    print(f"👉 图片页总数: {len(all_pages)}")
+    logger.info(f"  📋 共发现 {len(galleries)} 个新图集")
+    return galleries
 
-    semaphore = asyncio.Semaphore(3)
 
-    async def fetch(url):
-        for attempt in range(3):
+# ====================== 抓取单图集全部图片 ======================
+async def get_all_images(client: httpx.AsyncClient, base_url: str) -> list[str]:
+    try:
+        r = await client.get(base_url, timeout=30)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # 计算最大页数
+        max_page = 0
+        for a in soup.select(".ptt a"):
             try:
-                async with semaphore:
-                    r = await client.get(url)
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    img = soup.select_one("#img")
-                    if img:
-                        return img["src"]
-            except Exception as e:
-                print(f"  ⚠️ 图片页抓取失败 (第{attempt+1}次): {e}")
-                await asyncio.sleep(3)
-        return None
+                max_page = max(max_page, int(a.text))
+            except:
+                pass
 
-    results = await asyncio.gather(*[fetch(u) for u in all_pages])
-    return [r for r in results if r]
+        actual_pages = min(max_page + 1, MAX_PAGES_PER_GALLERY)
+        logger.info(f"📄 图集共 {max_page + 1} 页，本次抓取 {actual_pages} 页")
 
-# ========= 下载 =========
-async def download_images(client, urls):
-    semaphore = asyncio.Semaphore(3)
+        thumb_links = []
 
-    async def dl(url):
-        for attempt in range(3):
-            try:
-                async with semaphore:
+        semaphore = asyncio.Semaphore(PAGE_SEMAPHORE)
+        async def fetch_page(p: int):
+            url = f"{base_url}?p={p}" if p > 0 else base_url
+            async with semaphore:
+                try:
                     r = await client.get(url, timeout=30)
-                    if r.status_code == 200 and 5000 < len(r.content) < 10*1024*1024:
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    thumbs = [a["href"] for a in soup.select("#gdt a")]
+                    return thumbs
+                except Exception as e:
+                    logger.warning(f"  第 {p} 页抓取失败: {e}")
+                    return []
+
+        results = await asyncio.gather(*[fetch_page(i) for i in range(actual_pages)])
+        for thumbs in results:
+            thumb_links.extend(thumbs)
+
+        logger.info(f"👉 共找到 {len(thumb_links)} 张图片页")
+
+        # 提取真实图片链接
+        semaphore = asyncio.Semaphore(PAGE_SEMAPHORE)
+        async def fetch_image_url(url: str):
+            async with semaphore:
+                for attempt in range(3):
+                    try:
+                        r = await client.get(url, timeout=30)
+                        soup = BeautifulSoup(r.text, "html.parser")
+                        img = soup.select_one("#img")
+                        if img and img.get("src"):
+                            return img["src"]
+                    except Exception:
+                        await asyncio.sleep(2)
+            return None
+
+        image_urls = await asyncio.gather(*[fetch_image_url(u) for u in thumb_links])
+        return [u for u in image_urls if u]
+
+    except Exception as e:
+        logger.error(f"获取图集图片失败: {e}")
+        return []
+
+
+# ====================== 下载图片 ======================
+async def download_images(client: httpx.AsyncClient, urls: list[str]) -> list[bytes]:
+    semaphore = asyncio.Semaphore(DOWNLOAD_SEMAPHORE)
+
+    async def dl(url: str):
+        for attempt in range(3):
+            try:
+                async with semaphore:
+                    r = await client.get(url, timeout=40)
+                    if r.status_code == 200 and 5000 < len(r.content) < 10 * 1024 * 1024:
                         return r.content
             except Exception as e:
-                print(f"  ⚠️ 图片下载失败 (第{attempt+1}次): {e}")
+                logger.debug(f"  下载失败 (第{attempt+1}次): {e}")
                 await asyncio.sleep(3)
         return None
 
     results = await asyncio.gather(*[dl(u) for u in urls])
-    return [r for r in results if r]
+    images = [r for r in results if r]
+    logger.info(f"  ✅ 成功下载 {len(images)} 张图片")
+    return images
 
-# ========= 过滤比例异常的图片 =========
-def filter_valid_images(images: list[bytes]) -> list[bytes]:
-    """过滤掉 Telegram 无法接受的极端比例图片（宽高比超过 20:1）"""
-    valid = []
-    for data in images:
+
+# ====================== 安全发送（异步包装） ======================
+async def send_media_group_safe(bot: Bot, chat_id: str, media: list[InputMediaPhoto]) -> list | None:
+    """发送 media group，自动重试 + flood control"""
+    for attempt in range(6):
         try:
-            img = Image.open(BytesIO(data))
-            w, h = img.size
-            if w == 0 or h == 0:
-                continue
-            ratio = max(w, h) / min(w, h)
-            if ratio > 20:
-                print(f"  ⚠️ 跳过极端比例图片 {w}x{h}（比例 {ratio:.1f}:1）")
-                continue
-            valid.append(data)
-        except Exception:
-            valid.append(data)  # 无法解析的保留，让 Telegram 自己判断
-    return valid
+            return await asyncio.to_thread(
+                bot.send_media_group,
+                chat_id=chat_id,
+                media=media
+            )
+        except RetryAfter as e:
+            wait = e.retry_after + 2
+            logger.warning(f"  ⏳ Flood control，等待 {wait} 秒...")
+            await asyncio.sleep(wait)
+        except TimedOut:
+            logger.warning(f"  ⏳ 超时，重试 (第{attempt+1}次)")
+            await asyncio.sleep(10)
+        except BadRequest as e:
+            logger.warning(f"  ⚠️ BadRequest: {e}，尝试逐张发送跳过问题图...")
+            for single in media:
+                try:
+                    await asyncio.to_thread(
+                        bot.send_media_group,
+                        chat_id=chat_id,
+                        media=[single]
+                    )
+                    await asyncio.sleep(2)
+                except Exception as se:
+                    logger.warning(f"    跳过单张: {se}")
+            return None
+        except Exception as e:
+            logger.error(f"  ⚠️ 发送失败 (第{attempt+1}次): {e}")
+            await asyncio.sleep(5)
+    return None
 
-# ========= 发送图集 =========
-async def send_groups(bot, images, skip_filter=False):
-    from telegram.error import RetryAfter, TimedOut, BadRequest
 
-    first_msg = None
+async def send_photo_safe(bot: Bot, chat_id: str, photo: bytes, caption: str = None):
+    """发送单张带文字的图片"""
+    for attempt in range(5):
+        try:
+            await asyncio.to_thread(
+                bot.send_photo,
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+            return True
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 2)
+        except Exception as e:
+            logger.error(f"  ⚠️ 封面发送失败 (第{attempt+1}次): {e}")
+            await asyncio.sleep(4)
+    return False
 
-    # 过滤比例异常图片，封面单独传入时跳过过滤
-    if not skip_filter:
-        images = filter_valid_images(images)
+
+# ====================== 发送图组（除封面外） ======================
+async def send_groups(bot: Bot, images: list[bytes]):
+    if not images:
+        return
+    images = filter_valid_images(images)   # 最终过滤
+    if not images:
+        return
 
     for i in range(0, len(images), 10):
-        chunk = images[i:i+10]
+        chunk = images[i:i + 10]
         media = [InputMediaPhoto(media=img) for img in chunk]
+        await send_media_group_safe(bot, IMAGE_CHANNEL, media)
+        await asyncio.sleep(5)   # 组间间隔防 flood
 
-        for attempt in range(5):
-            try:
-                msgs = await bot.send_media_group(chat_id=IMAGE_CHANNEL, media=media)
-                if not first_msg:
-                    first_msg = msgs[0]
-                break
-            except RetryAfter as e:
-                wait = e.retry_after + 2
-                print(f"  ⏳ Flood control，等待 {wait} 秒...")
-                await asyncio.sleep(wait)
-            except TimedOut:
-                print(f"  ⏳ 超时，等待 10 秒后重试 (第{attempt+1}次)...")
-                await asyncio.sleep(10)
-            except BadRequest as e:
-                # ✅ 修复：整组里有一张图尺寸不对就会失败，逐张发来找出问题图并跳过
-                print(f"  ⚠️ BadRequest: {e}，尝试逐张发送跳过问题图...")
-                for single in chunk:
-                    try:
-                        msgs = await bot.send_media_group(
-                            chat_id=IMAGE_CHANNEL,
-                            media=[InputMediaPhoto(media=single)]
-                        )
-                        if not first_msg:
-                            first_msg = msgs[0]
-                        await asyncio.sleep(2)
-                    except Exception as se:
-                        print(f"    跳过一张: {se}")
-                break
-            except Exception as e:
-                print(f"  ⚠️ 发送失败 (第{attempt+1}次): {e}")
-                await asyncio.sleep(5)
 
-        await asyncio.sleep(5)  # ✅ 修复：每组之间等待加长到 5 秒，减少 flood
-
-    return first_msg.message_id if first_msg else None
-
-# ========= 发封面 =========
-async def send_cover(bot, image, title, link):
-    text = (
-        f"<b>{title}</b>\n\n"
-        f"<a href='{link}'>👉 查看全部图片 / View Full Gallery</a>"
-    )
-
-    await bot.send_photo(
-        chat_id=MAIN_CHANNEL,
-        photo=image,
-        caption=text,
-        parse_mode=ParseMode.HTML
-    )
-
-# ========= 主流程 =========
+# ====================== 主流程 ======================
 async def main():
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
@@ -317,81 +359,83 @@ async def main():
     async with httpx.AsyncClient(
         headers=HEADERS,
         cookies=COOKIES,
-        timeout=60
+        timeout=60,
+        follow_redirects=True,
     ) as client:
 
-        galleries = await get_galleries(client)
+        galleries = await get_new_galleries(client, seen)
 
         for g in galleries:
-            uid = g["gid"] + "_" + g["token"]
+            uid = g["uid"]
 
             if uid in seen:
-                print(f"⏭️ 跳过已发: {g['title']}")
                 continue
 
-            print(f"\n处理: {g['title']}")
+            logger.info(f"\n🚀 开始处理: {g['title']}")
 
-            urls = await get_all_images(client, g["url"])
-            if not urls:
-                print(f"  ⚠️ 未抓到图片，跳过")
-                continue
+            try:
+                # 1. 抓图片链接
+                urls = await get_all_images(client, g["url"])
+                if not urls:
+                    logger.warning("  ⚠️ 未抓到任何图片，跳过")
+                    continue
 
-            images = await download_images(client, urls)
-            if not images:
-                print(f"  ⚠️ 图片下载全部失败，跳过")
-                continue
+                # 2. 下载
+                images = await download_images(client, urls)
+                if not images:
+                    logger.warning("  ⚠️ 下载全部失败，跳过")
+                    continue
 
-            print(f"  ✅ 成功下载 {len(images)} 张图片")
+                # 3. 过滤
+                images = filter_valid_images(images)
+                if not images:
+                    logger.warning("  ⚠️ 过滤后无有效图片，跳过")
+                    continue
 
-            # ✅ 修复：过滤比例异常的图片，避免 photo_invalid_dimensions
-            images = filter_safe_images(images)
-            if not images:
-                print(f"  ⚠️ 过滤后无图片，跳过")
-                continue
+                # 4. 选封面
+                cover = pick_cover(images)
+                rest = [img for img in images if img is not cover]
 
-            # 选封面（竖图优先，文件最大优先）
-            cover = pick_cover(images)
-            rest = [img for img in images if img is not cover]
+                # 5. 先发封面到图组频道（单独一条）
+                cover_msg = await send_media_group_safe(
+                    bot, IMAGE_CHANNEL, [InputMediaPhoto(media=cover)]
+                )
+                if not cover_msg:
+                    logger.warning("  ⚠️ 封面发送失败，跳过该图集")
+                    continue
 
-            # 第一步：封面单独发到群组（不经过比例过滤，确保封面一定出现）
-            from telegram.error import RetryAfter, TimedOut
-            cover_msg = None
-            for attempt in range(5):
-                try:
-                    msgs = await bot.send_media_group(
-                        chat_id=IMAGE_CHANNEL,
-                        media=[InputMediaPhoto(media=cover)]
-                    )
-                    cover_msg = msgs[0]
-                    print(f"  📸 封面已发到群组")
-                    break
-                except RetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 2)
-                except TimedOut:
-                    await asyncio.sleep(10)
-                except Exception as e:
-                    print(f"  ⚠️ 封面发送失败 (第{attempt+1}次): {e}")
-                    await asyncio.sleep(5)
+                logger.info("  📸 封面已发送到图组频道")
 
-            await asyncio.sleep(3)
+                # 6. 发剩余图片
+                await send_groups(bot, rest)
 
-            # 第二步：其余图片发到群组（经过比例过滤）
-            await send_groups(bot, rest)
-
-            # 第三步：封面发到频道，链接指向群组封面那条消息
-            if cover_msg:
-                msg_id = cover_msg.message_id
-                if IMAGE_CHANNEL.startswith("-100"):
-                    channel_pure = IMAGE_CHANNEL[4:]
-                    link = f"https://t.me/c/{channel_pure}/{msg_id}"
+                # 7. 构造私聊频道链接并发送封面到主频道
+                msg_id = cover_msg[0].message_id
+                if str(IMAGE_CHANNEL).startswith("-100"):
+                    channel_id = str(IMAGE_CHANNEL)[4:]
+                    link = f"https://t.me/c/{channel_id}/{msg_id}"
                 else:
                     link = f"https://t.me/{IMAGE_CHANNEL.lstrip('@')}/{msg_id}"
-                await send_cover(bot, cover, g["title"], link)
-                print(f"  ✅ 发送完成: {g['title']}")
 
-            seen.add(uid)
-            save_seen(seen)
+                text = (
+                    f"<b>{g['title']}</b>\n\n"
+                    f"<a href='{link}'>👉 查看全部图片 / View Full Gallery</a>"
+                )
+                await send_photo_safe(bot, MAIN_CHANNEL, cover, text)
 
-            await asyncio.sleep(10)
+                # 8. 记录已发
+                seen.add(uid)
+                save_seen(seen)
+                logger.info(f"  ✅ 图集处理完成: {g['title']}")
 
-asyncio.run(main())
+                await asyncio.sleep(10)   # 图集间间隔
+
+            except Exception as e:
+                logger.error(f"  ❌ 处理图集时发生异常: {e}", exc_info=True)
+                continue
+
+    logger.info("🎉 本次任务全部完成")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
