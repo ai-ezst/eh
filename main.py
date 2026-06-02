@@ -70,7 +70,6 @@ def upload_image_to_telegraph(data: bytes) -> str | None:
         if original_format == "WEBP":
             print(f"  🔄 WebP → JPEG 转换中... ", end="")
             buffer = BytesIO()
-            # 高质量转换
             img.convert("RGB").save(buffer, format="JPEG", quality=95, optimize=True)
             upload_data = buffer.getvalue()
             print(f"完成 ({len(upload_data)//1024}KB)")
@@ -402,4 +401,40 @@ async def main():
                 save_seen(seen)
                 continue
 
-            print(f"  🔗 共获取 {len(image_pairs
+            print(f"  🔗 共获取 {len(image_pairs)} 个图片 URL")
+
+            telegraph_urls, cover_candidates = await download_and_upload_all(client, image_pairs)
+
+            if not telegraph_urls:
+                print(f"  ⚠️ 没有图片上传成功，跳过")
+                seen.add(uid)
+                save_seen(seen)
+                continue
+
+            print(f"  ✅ 成功上传 {len(telegraph_urls)}/{len(image_pairs)} 张到 Telegraph")
+
+            telegraph_url = create_telegraph_page(g["title"], telegraph_urls)
+            if not telegraph_url:
+                print(f"  ⚠️ Telegraph 页面创建失败，跳过")
+                seen.add(uid)
+                save_seen(seen)
+                continue
+
+            if not cover_candidates:
+                print(f"  ⚠️ 无封面候选，跳过")
+                seen.add(uid)
+                save_seen(seen)
+                continue
+
+            cover = pick_cover(cover_candidates)
+
+            await send_cover(bot, cover, g["title"], telegraph_url)
+            print(f"  ✅ 发送完成: {g['title']}")
+
+            seen.add(uid)
+            save_seen(seen)
+
+            print(f"\n✅ 本次运行完成，下次运行继续处理剩余图集")
+            break
+
+asyncio.run(main())
