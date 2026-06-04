@@ -2,7 +2,7 @@ name: EH Cosplay → TG Auto Post
 
 on:
   schedule:
-    - cron: "0 */24 * * *"
+    - cron: "0 */12 * * *"
   workflow_dispatch:
 
 jobs:
@@ -35,6 +35,7 @@ jobs:
           IMAGE_CHANNEL_ID: ${{ secrets.IMAGE_CHANNEL_ID }}
           EH_MEMBER_ID:     ${{ secrets.EH_MEMBER_ID }}
           EH_PASS_HASH:     ${{ secrets.EH_PASS_HASH }}
+          TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
         run: python main.py
 
       - name: Save sent state to repo
