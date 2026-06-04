@@ -393,8 +393,6 @@ async def main():
             seen.add(uid)
             save_seen(seen)
 
-            # 每次只处理1个新图集，下次运行继续
-            print(f"\n✅ 本次运行完成，下次运行继续处理剩余图集")
-            break
+
 
 asyncio.run(main())
