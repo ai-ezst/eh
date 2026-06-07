@@ -21,6 +21,7 @@ TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN", "").strip()
 STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
 MAX_PAGES = 20
+LIST_PAGES = 1  # 每次抓列表页数
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -153,49 +154,62 @@ def pick_cover(images: list[bytes]) -> bytes:
         return images[0]
 
 
-# ========= 抓首页图集列表 =========
+# ========= 抓列表多页图集 =========
 async def get_galleries(client):
-    r = await client.get(COSPLAY_URL)
-    soup = BeautifulSoup(r.text, "html.parser")
-
     galleries = []
     seen_urls = set()
 
-    for a in soup.select("a[href*='/g/']"):
-        href = a.get("href", "")
-        m = re.search(r"/g/(\d+)/([a-f0-9]+)/", href)
-        if not m:
-            continue
-        if href in seen_urls:
-            continue
-        seen_urls.add(href)
+    for page in range(LIST_PAGES):
+        # e-hentai 列表翻页参数是 &page=N（从0开始）
+        url = COSPLAY_URL if page == 0 else f"{COSPLAY_URL}&page={page}"
+        print(f"  📄 列表第{page+1}页: {url}")
 
-        title_node = a.select_one(".glink") or a.find(class_="glink")
-        if not title_node:
-            parent = a.parent
-            for _ in range(5):
-                if not parent:
-                    break
-                title_node = parent.select_one(".glink")
-                if title_node:
-                    break
-                parent = parent.parent
-
-        if not title_node:
+        try:
+            r = await client.get(url)
+            soup = BeautifulSoup(r.text, "html.parser")
+        except Exception as e:
+            print(f"  ⚠️ 列表第{page+1}页抓取失败: {e}")
             continue
 
-        title = clean_title(title_node.text)
-        if not title:
-            continue
+        for a in soup.select("a[href*='/g/']"):
+            href = a.get("href", "")
+            m = re.search(r"/g/(\d+)/([a-f0-9]+)/", href)
+            if not m:
+                continue
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
 
-        galleries.append({
-            "gid": m.group(1),
-            "token": m.group(2),
-            "url": href,
-            "title": title
-        })
+            title_node = a.select_one(".glink") or a.find(class_="glink")
+            if not title_node:
+                parent = a.parent
+                for _ in range(5):
+                    if not parent:
+                        break
+                    title_node = parent.select_one(".glink")
+                    if title_node:
+                        break
+                    parent = parent.parent
 
-    print(f"  📋 共找到 {len(galleries)} 个图集")
+            if not title_node:
+                continue
+
+            title = clean_title(title_node.text)
+            if not title:
+                continue
+
+            galleries.append({
+                "gid": m.group(1),
+                "token": m.group(2),
+                "url": href,
+                "title": title
+            })
+
+        await asyncio.sleep(1)
+
+    # 倒序：从最旧的（列表最底部）开始发
+    galleries.reverse()
+    print(f"  📋 共找到 {len(galleries)} 个图集（从最旧开始处理）")
     return galleries
 
 
