@@ -5,10 +5,14 @@ on:
     - cron: "0 */12 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: eh-cosplay-post
+  cancel-in-progress: false
+
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60      # 从50改成60
 
     permissions:
       contents: write
@@ -30,11 +34,12 @@ jobs:
 
       - name: Run bot
         env:
-          BOT_TOKEN:        ${{ secrets.BOT_TOKEN }}
-          MAIN_CHANNEL_ID:  ${{ secrets.MAIN_CHANNEL_ID }}
+          PYTHONUNBUFFERED: 1
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          MAIN_CHANNEL_ID: ${{ secrets.MAIN_CHANNEL_ID }}
           IMAGE_CHANNEL_ID: ${{ secrets.IMAGE_CHANNEL_ID }}
-          EH_MEMBER_ID:     ${{ secrets.EH_MEMBER_ID }}
-          EH_PASS_HASH:     ${{ secrets.EH_PASS_HASH }}
+          EH_MEMBER_ID: ${{ secrets.EH_MEMBER_ID }}
+          EH_PASS_HASH: ${{ secrets.EH_PASS_HASH }}
           TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
         run: python main.py
 
@@ -44,4 +49,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add sent_galleries.json
-          git diff --staged --quiet || git commit -m "chore: update sent state [skip ci]" && git push
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update sent state [skip ci]"
+            git push
+          fi
