@@ -12,7 +12,6 @@ concurrency:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 60      # 从50改成60
 
     permissions:
       contents: write
