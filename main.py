@@ -123,6 +123,27 @@ def clean_title(title):
     return title.strip()
 
 
+
+# ========= 智能标签 =========
+def generate_tags(title: str) -> str:
+    stop_words = {
+        "by","the","of","and","or","for","with","from","to","in","on","at",
+        "is","are","a","an","photo","photos","set","collection","comic",
+        "comiket","c","vol","volume","part","chapter","artist","pixiv",
+        "twitter","fanbox","patreon","x","new","view","full","gallery"
+    }
+    words = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+", title)
+    tags=[]
+    for w in words:
+        if w.lower() in stop_words:
+            continue
+        if len(w)<=1 and not w.isdigit():
+            continue
+        if f"#{w}" not in tags:
+            tags.append(f"#{w}")
+    return " ".join(tags)
+
+
 # ========= 选最佳封面 =========
 def pick_cover(images: list[bytes]) -> bytes:
     portrait = []
@@ -324,9 +345,11 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
 
 # ========= 发封面到频道 =========
 async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
+    tags = generate_tags(title)
     caption = (
-        f"<b>{title}</b>\n\n"
-        f"<a href='{telegraph_url}'>👉 查看全部图片 / View Full Gallery</a>"
+        f"<b>{title}</b>\n"
+        f"{tags}\n\n"
+        f"<a href='{telegraph_url}'>👉 查看图集</a>"
     )
     await bot.send_photo(
         chat_id=MAIN_CHANNEL,
