@@ -84,7 +84,7 @@ def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
     # 在末尾追加推广图片和超链接
     content.append({
         "tag": "img",
-        "attrs": {"src": "https://ibb.co/9BKwxBV"}
+        "attrs": {"src": "https://i.ibb.co/bYwH4Y2/Chat-GPT-Image-2026-7-2-23-55-12.png"}
     })
     content.append({
         "tag": "p",
@@ -361,7 +361,7 @@ async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
     caption = (
         f"<b>{title}</b>\n"
         f"{tags}\n\n"
-        f"<a href='{telegraph_url}'>👉 查看图集/view all</a>"
+        f"<a href='{telegraph_url}'>👉 查看图集</a>"
     )
     await bot.send_photo(
         chat_id=MAIN_CHANNEL,
