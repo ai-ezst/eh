@@ -84,7 +84,7 @@ def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
     # 在末尾追加推广图片和超链接
     content.append({
         "tag": "img",
-        "attrs": {"src": "https://picui.ogmua.cn/s1/2026/07/11/6a51e2750e033.webp"}
+        "attrs": {"src": "https://ibb.co/9BKwxBV"}
     })
     content.append({
         "tag": "p",
