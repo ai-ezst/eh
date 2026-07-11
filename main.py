@@ -81,6 +81,18 @@ def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
     content = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
     print(f"  📝 创建 Telegraph 页面，共 {len(content)} 张图片")
 
+    # 在末尾追加推广图片和超链接
+    content.append({
+        "tag": "img",
+        "attrs": {"src": "https://picui.ogmua.cn/s1/2026/07/11/6a51e2750e033.webp"}
+    })
+    content.append({
+        "tag": "p",
+        "children": [
+            {"tag": "a", "attrs": {"href": "http://t.me/fljtkwbot"}, "children": ["🔍 点击搜索更多图集、Cos、福利姬… 懂的都懂 👀"]}
+        ]
+    })
+
     try:
         r = requests.post(
             "https://api.telegra.ph/createPage",
