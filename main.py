@@ -361,7 +361,7 @@ async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
     caption = (
         f"<b>{title}</b>\n"
         f"{tags}\n\n"
-        f"<a href='{telegraph_url}'>👉 查看图集</a>"
+        f"<a href='{telegraph_url}'>👉 点击查看图集/view Photo Gallery</a>"
     )
     await bot.send_photo(
         chat_id=MAIN_CHANNEL,
