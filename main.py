@@ -4,7 +4,7 @@ import asyncio
 import re
 import httpx
 import requests
-import time
+import base64
 from io import BytesIO
 from PIL import Image
 from bs4 import BeautifulSoup
@@ -17,6 +17,9 @@ MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
 TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN", "").strip()
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
 
 STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
@@ -35,40 +38,30 @@ COOKIES = {
     "ipb_pass_hash": EH_PASS_HASH
 }
 
-# ========= imgbb 上传 =========
-def upload_to_imgbb(image_data: bytes, image_type: str) -> str | None:
-    """上传图片到 imgbb（匿名），返回直链 URL"""
-    ext = image_type.split("/")[-1].replace("jpeg", "jpg")
-    url = "https://imgbb.com/json"
-    files = {"source": (f"image.{ext}", BytesIO(image_data), image_type)}
-    data = {
-        "type": "file",
-        "action": "upload",
-        "timestamp": str(int(time.time() * 1000)),
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Origin": "https://imgbb.com",
-        "Referer": "https://imgbb.com/",
-    }
+# ========= imgbb 上传（官方 API）=========
+async def upload_to_imgbb(client: httpx.AsyncClient, image_data: bytes) -> str | None:
+    """使用 imgbb 官方 API（需 API key）上传图片，返回直链 URL"""
+    b64 = base64.b64encode(image_data).decode()
     for attempt in range(3):
         try:
-            r = requests.post(url, files=files, data=data, headers=headers, timeout=30)
+            r = await client.post(
+                "https://api.imgbb.com/1/upload",
+                data={"key": IMGBB_API_KEY, "image": b64},
+                timeout=30,
+            )
             if r.status_code == 200:
                 resp = r.json()
-                if resp.get("status_code") == 200 and "image" in resp:
-                    return resp["image"]["image"]["url"]
+                if resp.get("success"):
+                    return resp["data"]["url"]
                 else:
-                    print(f"  ❌ imgbb 错误: {resp.get('status_txt', 'unknown')}")
+                    print(f"  ❌ imgbb 错误: {resp.get('status', 'unknown')}")
             else:
                 print(f"  ❌ imgbb HTTP {r.status_code}: {r.text[:100]}")
         except Exception as e:
             print(f"  ❌ imgbb 上传异常 ({attempt+1}/3): {e}")
         if attempt < 2:
-            time.sleep(2)
+            await asyncio.sleep(2)
     return None
-
-
 # ========= Telegraph =========
 def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
     """用 imgbb 直链创建 Telegraph 页面"""
@@ -313,8 +306,8 @@ async def download_one(client, url) -> bytes | None:
 # ========= 下载 → 上传 imgbb → 释放内存 =========
 async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]:
     """
-    逐张下载 → 上传 imgbb → 立即释放内存
-    返回：(imgbb_urls, 前20张原始数据用于选封面)
+    逐张下载 → 上传 imgbb（官方 API）→ 释放内存
+    返回: imgbb_urls, 前20张原始数据用于选封面
     """
     imgbb_urls = []
     cover_candidates = []
@@ -330,27 +323,17 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
         if len(cover_candidates) < 20:
             cover_candidates.append(data)
 
-        # 判断图片类型
-        if data[:4] == b'\x89PNG':
-            image_type = "image/png"
-        elif data[:2] == b'\xff\xd8':
-            image_type = "image/jpeg"
-        elif data[:4] == b'RIFF':
-            image_type = "image/webp"
-        else:
-            image_type = "image/jpeg"
-
-        # 上传到 imgbb
-        imgbb_url = upload_to_imgbb(data, image_type)
+        # 上传到 imgbb（官方 API）
+        imgbb_url = await upload_to_imgbb(client, data)
         if imgbb_url:
+            print(f"  ✅ [{i+1}/{total}] 上传成功")
             imgbb_urls.append(imgbb_url)
-            print(f"  ☁️ [{i+1}/{total}] 上传成功")
         else:
             print(f"  ⚠️ [{i+1}/{total}] 上传失败，跳过")
 
         # 立即释放内存
         del data
-        time.sleep(2.5)  # 遵守 imgbb 频率限制
+        await asyncio.sleep(2.5)  # 遵守 imgbb 频率限制
 
     return imgbb_urls, cover_candidates
 
