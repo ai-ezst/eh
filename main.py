@@ -12,8 +12,6 @@ from telegram.constants import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
-IMAGE_BOT_TOKEN = os.getenv("IMAGE_BOT_TOKEN", "6975821458:AAE-zcgfkFh-h_LflZTPMZijHRmgqpfUvFM")
-IMAGE_CHAT_ID = os.getenv("IMAGE_CHAT_ID", "-1002570901960")
 
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
@@ -36,23 +34,30 @@ COOKIES = {
     "ipb_pass_hash": EH_PASS_HASH
 }
 
-# ========= 通过 Telegram 中转上传（替代 imgbb）=========
-async def upload_to_telegraph_via_tg(image_data: bytes) -> str | None:
-    """把图片发到中转群，取 Telegram CDN 直链，供 Telegraph 使用"""
-    if not IMAGE_BOT_TOKEN or not IMAGE_CHAT_ID:
-        print("  ❌ 未配置 IMAGE_BOT_TOKEN 或 IMAGE_CHAT_ID")
-        return None
-    bot = Bot(IMAGE_BOT_TOKEN)
+# ========= 直接上传到 Telegraph 服务器 =========
+async def upload_to_telegraph_direct(image_data: bytes) -> str | None:
+    """直接上传图片到 Telegraph CDN，返回直链 URL，供 createPage 使用"""
     for attempt in range(3):
         try:
-            msg = await bot.send_photo(chat_id=IMAGE_CHAT_ID, photo=image_data)
-            file_id = msg.photo[-1].file_id
-            file = await bot.get_file(file_id)
-            return f"https://api.telegram.org/file/bot{IMAGE_BOT_TOKEN}/{file.file_path}"
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    "https://telegra.ph/upload",
+                    files={"files": ("image.jpg", image_data, "image/jpeg")},
+                )
+            if r.status_code == 200:
+                result = r.json()
+                if isinstance(result, list) and len(result) > 0:
+                    src = result[0]["src"]
+                    url = f"https://telegra.ph{src}"
+                    return url
+                else:
+                    print(f"  ❌ Telegraph 上传返回格式异常: {r.text[:100]}")
+            else:
+                print(f"  ❌ Telegraph 上传 HTTP {r.status_code}: {r.text[:100]}")
         except Exception as e:
-            print(f"  ❌ 中转上传异常 ({attempt+1}/3): {e}")
+            print(f"  ❌ Telegraph 上传异常 ({attempt+1}/3): {e}")
             if attempt < 2:
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
     return None
 
 def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
@@ -324,7 +329,7 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
         if len(cover_candidates) < 20:
             cover_candidates.append(data)
 
-        tg_url = await upload_to_telegraph_via_tg(data)
+        tg_url = await upload_to_telegraph_direct(data)
         if tg_url:
             tg_urls.append(tg_url)
             print(f"  ✅ [{i+1}/{total}] 中转上传成功")
