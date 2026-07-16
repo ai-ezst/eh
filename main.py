@@ -44,6 +44,7 @@ async def upload_to_catbox(image_data: bytes) -> str | None:
                     "https://catbox.moe/user/api.php",
                     data={"reqtype": "fileupload"},
                     files={"fileToUpload": ("image.jpg", image_data, "image/jpeg")},
+                    headers={"Referer": "https://catbox.moe/"},
                 )
             # catbox 返回 500 但 body 就是 URL
             url = r.text.strip()
