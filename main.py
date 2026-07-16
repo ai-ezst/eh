@@ -4,7 +4,6 @@ import asyncio
 import re
 import httpx
 import requests
-import base64
 from io import BytesIO
 from PIL import Image
 from bs4 import BeautifulSoup
@@ -13,18 +12,17 @@ from telegram.constants import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
+IMAGE_BOT_TOKEN = os.getenv("IMAGE_BOT_TOKEN", "6975821458:AAE-zcgfkFh-h_LflZTPMZijHRmgqpfUvFM")
+IMAGE_CHAT_ID = os.getenv("IMAGE_CHAT_ID", "-1002570901960")
 
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
 TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN", "").strip()
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
 
 STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
 MAX_PAGES = 20
-LIST_PAGES = 1  # 每次抓列表页数
+LIST_PAGES = 1
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -38,33 +36,27 @@ COOKIES = {
     "ipb_pass_hash": EH_PASS_HASH
 }
 
-# ========= imgbb 上传（官方 API）=========
-async def upload_to_imgbb(client: httpx.AsyncClient, image_data: bytes) -> str | None:
-    """使用 imgbb 官方 API（需 API key）上传图片，返回直链 URL"""
-    b64 = base64.b64encode(image_data).decode()
+# ========= 通过 Telegram 中转上传（替代 imgbb）=========
+async def upload_to_telegraph_via_tg(image_data: bytes) -> str | None:
+    """把图片发到中转群，取 Telegram CDN 直链，供 Telegraph 使用"""
+    if not IMAGE_BOT_TOKEN or not IMAGE_CHAT_ID:
+        print("  ❌ 未配置 IMAGE_BOT_TOKEN 或 IMAGE_CHAT_ID")
+        return None
+    bot = Bot(IMAGE_BOT_TOKEN)
     for attempt in range(3):
         try:
-            r = await client.post(
-                "https://api.imgbb.com/1/upload",
-                data={"key": IMGBB_API_KEY, "image": b64},
-                timeout=30,
-            )
-            if r.status_code == 200:
-                resp = r.json()
-                if resp.get("success"):
-                    return resp["data"]["url"]
-                else:
-                    print(f"  ❌ imgbb 错误: {resp.get('status', 'unknown')}")
-            else:
-                print(f"  ❌ imgbb HTTP {r.status_code}: {r.text[:100]}")
+            msg = await bot.send_photo(chat_id=IMAGE_CHAT_ID, photo=image_data)
+            file_id = msg.photo[-1].file_id
+            file = await bot.get_file(file_id)
+            return f"https://api.telegram.org/file/bot{IMAGE_BOT_TOKEN}/{file.file_path}"
         except Exception as e:
-            print(f"  ❌ imgbb 上传异常 ({attempt+1}/3): {e}")
-        if attempt < 2:
-            await asyncio.sleep(2)
+            print(f"  ❌ 中转上传异常 ({attempt+1}/3): {e}")
+            if attempt < 2:
+                await asyncio.sleep(3)
     return None
-# ========= Telegraph =========
+
 def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
-    """用 imgbb 直链创建 Telegraph 页面"""
+    """用 TG 直链创建 Telegraph 页面"""
     if not TELEGRAPH_TOKEN:
         print("  ⚠️ 未配置 TELEGRAPH_TOKEN")
         return None
@@ -111,6 +103,7 @@ def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
 
 
 # ========= 状态 =========
+
 def load_seen():
     if not os.path.exists(STATE_FILE):
         return set()
@@ -121,6 +114,7 @@ def save_seen(seen):
 
 
 # ========= 标题清洗 =========
+
 def clean_title(title):
     title = re.sub(r'\[.*?\]', '', title)
     title = re.sub(r'f:[^ ]+', '', title)
@@ -130,6 +124,7 @@ def clean_title(title):
 
 
 # ========= 智能标签 =========
+
 def generate_tags(title: str) -> str:
     stop_words = {
         "by","the","of","and","or","for","with","from","to","in","on","at",
@@ -150,6 +145,7 @@ def generate_tags(title: str) -> str:
 
 
 # ========= 选最佳封面 =========
+
 def pick_cover(images: list[bytes]) -> bytes:
     portrait = []
     all_imgs = []
@@ -181,6 +177,7 @@ def pick_cover(images: list[bytes]) -> bytes:
 
 
 # ========= 抓列表多页图集 =========
+
 async def get_galleries(client):
     galleries = []
     seen_urls = set()
@@ -240,6 +237,7 @@ async def get_galleries(client):
 
 
 # ========= 抓图集所有图片直链 =========
+
 async def get_all_image_urls(client, base_url):
     r = await client.get(base_url)
     soup = BeautifulSoup(r.text, "html.parser")
@@ -291,25 +289,29 @@ async def get_all_image_urls(client, base_url):
 
 
 # ========= 下载单张图片 =========
+
 async def download_one(client, url) -> bytes | None:
     for attempt in range(3):
         try:
             r = await client.get(url, timeout=30)
             if r.status_code == 200 and 5000 < len(r.content) < 10 * 1024 * 1024:
                 return r.content
+            if r.status_code == 509:
+                print(f"  ⚠️ E-Hentai 509 流量超限: {url}")
         except Exception as e:
             print(f"  ⚠️ 下载失败 (第{attempt+1}次): {e}")
             await asyncio.sleep(3)
     return None
 
 
-# ========= 下载 → 上传 imgbb → 释放内存 =========
+
+# ========= 下载 → 中转上传 → 释放内存 =========
 async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]:
     """
-    逐张下载 → 上传 imgbb（官方 API）→ 释放内存
-    返回: imgbb_urls, 前20张原始数据用于选封面
+    逐张下载 → 通过 Telegram 中转上传 → 释放内存
+    返回: tg_urls（Telegraph 可用直链）, 前20张原始数据用于选封面
     """
-    imgbb_urls = []
+    tg_urls = []
     cover_candidates = []
     total = len(urls)
 
@@ -319,26 +321,22 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
             print(f"  ⚠️ [{i+1}/{total}] 下载失败，跳过")
             continue
 
-        # 保留前20张用于选封面
         if len(cover_candidates) < 20:
             cover_candidates.append(data)
 
-        # 上传到 imgbb（官方 API）
-        imgbb_url = await upload_to_imgbb(client, data)
-        if imgbb_url:
-            print(f"  ✅ [{i+1}/{total}] 上传成功")
-            imgbb_urls.append(imgbb_url)
+        tg_url = await upload_to_telegraph_via_tg(data)
+        if tg_url:
+            tg_urls.append(tg_url)
+            print(f"  ✅ [{i+1}/{total}] 中转上传成功")
         else:
-            print(f"  ⚠️ [{i+1}/{total}] 上传失败，跳过")
+            print(f"  ⚠️ [{i+1}/{total}] 中转上传失败，跳过")
 
-        # 立即释放内存
         del data
-        await asyncio.sleep(2.5)  # 遵守 imgbb 频率限制
+        await asyncio.sleep(0.5)
 
-    return imgbb_urls, cover_candidates
+    return tg_urls, cover_candidates
 
 
-# ========= 发封面到频道 =========
 async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
     tags = generate_tags(title)
     caption = (
@@ -355,6 +353,7 @@ async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
 
 
 # ========= 主流程 =========
+
 async def main():
     if not TELEGRAPH_TOKEN:
         print("❌ 未配置 TELEGRAPH_TOKEN，退出")
@@ -390,19 +389,19 @@ async def main():
 
             print(f"  🔗 共获取 {len(urls)} 个图片 URL")
 
-            # 逐张下载 → 上传 imgbb → 释放内存
-            imgbb_urls, cover_candidates = await download_and_upload_all(client, urls)
+            # 逐张下载 → 中转上传 → 释放内存
+            tg_urls, cover_candidates = await download_and_upload_all(client, urls)
 
-            if not imgbb_urls:
+            if not tg_urls:
                 print(f"  ⚠️ 没有图片上传成功，跳过")
                 seen.add(uid)
                 save_seen(seen)
                 continue
 
-            print(f"  ✅ 成功上传 {len(imgbb_urls)}/{len(urls)} 张到 imgbb")
+            print(f"  ✅ 成功上传 {len(tg_urls)}/{len(urls)} 张到中转")
 
             # 创建 Telegraph 页面
-            telegraph_url = create_telegraph_page(g["title"], imgbb_urls)
+            telegraph_url = create_telegraph_page(g["title"], tg_urls)
             if not telegraph_url:
                 print(f"  ⚠️ Telegraph 页面创建失败，跳过")
                 seen.add(uid)
