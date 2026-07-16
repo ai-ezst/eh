@@ -34,30 +34,27 @@ COOKIES = {
     "ipb_pass_hash": EH_PASS_HASH
 }
 
-# ========= 直接上传到 Telegraph 服务器 =========
-async def upload_to_telegraph_direct(image_data: bytes) -> str | None:
-    """直接上传图片到 Telegraph CDN，返回直链 URL，供 createPage 使用"""
+# ========= 上传到 catbox.moe 图床 =========
+async def upload_to_catbox(image_data: bytes) -> str | None:
+    """上传图片到 catbox.moe（免费、无需注册），返回直链 URL"""
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=30) as c:
+            async with httpx.AsyncClient(timeout=60) as c:
                 r = await c.post(
-                    "https://telegra.ph/upload",
-                    files={"files": ("image.jpg", image_data, "image/jpeg")},
+                    "https://catbox.moe/user/api.php",
+                    data={"reqtype": "fileupload"},
+                    files={"fileToUpload": ("image.jpg", image_data, "image/jpeg")},
                 )
-            if r.status_code == 200:
-                result = r.json()
-                if isinstance(result, list) and len(result) > 0:
-                    src = result[0]["src"]
-                    url = f"https://telegra.ph{src}"
-                    return url
-                else:
-                    print(f"  ❌ Telegraph 上传返回格式异常: {r.text[:100]}")
+            # catbox 返回 500 但 body 就是 URL
+            url = r.text.strip()
+            if url.startswith("https://files.catbox.moe/"):
+                return url
             else:
-                print(f"  ❌ Telegraph 上传 HTTP {r.status_code}: {r.text[:100]}")
+                print(f"  ❌ catbox 上传返回异常: {r.status_code} {url[:100]}")
         except Exception as e:
-            print(f"  ❌ Telegraph 上传异常 ({attempt+1}/3): {e}")
+            print(f"  ❌ catbox 上传异常 ({attempt+1}/3): {e}")
             if attempt < 2:
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
     return None
 
 def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
@@ -329,12 +326,12 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
         if len(cover_candidates) < 20:
             cover_candidates.append(data)
 
-        tg_url = await upload_to_telegraph_direct(data)
+        tg_url = await upload_to_catbox(data)
         if tg_url:
             tg_urls.append(tg_url)
-            print(f"  ✅ [{i+1}/{total}] 中转上传成功")
+            print(f"  ✅ [{i+1}/{total}] 图床上传成功")
         else:
-            print(f"  ⚠️ [{i+1}/{total}] 中转上传失败，跳过")
+            print(f"  ⚠️ [{i+1}/{total}] 图床上传失败，跳过")
 
         del data
         await asyncio.sleep(0.5)
@@ -403,7 +400,7 @@ async def main():
                 save_seen(seen)
                 continue
 
-            print(f"  ✅ 成功上传 {len(tg_urls)}/{len(urls)} 张到中转")
+            print(f"  ✅ 成功上传 {len(tg_urls)}/{len(urls)} 张到 catbox")
 
             # 创建 Telegraph 页面
             telegraph_url = create_telegraph_page(g["title"], tg_urls)
