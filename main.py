@@ -39,23 +39,36 @@ async def upload_to_catbox(image_data: bytes) -> str | None:
     """上传图片到 catbox.moe（免费、无需注册），返回直链 URL"""
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=60) as c:
-                r = await c.post(
-                    "https://catbox.moe/user/api.php",
-                    data={"reqtype": "fileupload"},
-                    files={"fileToUpload": ("image.jpg", image_data, "image/jpeg")},
-                    headers={"Referer": "https://catbox.moe/"},
-                )
-            # catbox 返回 500 但 body 就是 URL
-            url = r.text.strip()
-            if url.startswith("https://files.catbox.moe/"):
-                return url
-            else:
-                print(f"  ❌ catbox 上传返回异常: {r.status_code} {url[:100]}")
+            r = await asyncio.to_thread(upload_to_catbox_sync, image_data)
+            if r:
+                return r
         except Exception as e:
             print(f"  ❌ catbox 上传异常 ({attempt+1}/3): {e}")
             if attempt < 2:
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
+    return None
+
+def upload_to_catbox_sync(image_data: bytes) -> str | None:
+    """同步版：用 requests 上传到 catbox.moe"""
+    import requests
+    try:
+        r = requests.post(
+            "https://catbox.moe/user/api.php",
+            data={"reqtype": "fileupload"},
+            files={"fileToUpload": ("image.jpg", image_data, "image/jpeg")},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://catbox.moe/",
+            },
+            timeout=60,
+        )
+        url = r.text.strip()
+        if url.startswith("https://files.catbox.moe/"):
+            return url
+        else:
+            print(f"  ❌ catbox 上传返回异常: {r.status_code} {url[:100]}")
+    except Exception as e:
+        print(f"  ❌ catbox 上传异常: {e}")
     return None
 
 def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
