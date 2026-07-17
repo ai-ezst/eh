@@ -12,6 +12,8 @@ from telegram.constants import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
+IMAGE_BOT_TOKEN = os.getenv("IMAGE_BOT_TOKEN", "6975821458:AAE-zcgfkFh-h_LflZTPMZijHRmgqpfUvFM")
+IMAGE_CHAT_ID = os.getenv("IMAGE_CHAT_ID", "-1002570901960")
 
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
@@ -34,88 +36,28 @@ COOKIES = {
     "ipb_pass_hash": EH_PASS_HASH
 }
 
-# ========= 上传到 catbox.moe 图床 =========
-async def upload_to_catbox(image_data: bytes) -> str | None:
-    """上传图片到 catbox.moe（免费、无需注册），返回直链 URL"""
+
+# ========= 通过 Telegram 中转上传 =========
+async def upload_via_telegram(image_data: bytes) -> str | None:
+    """发图到中转群，取 Telegram CDN 直链，供 Telegraph 使用"""
+    bot = Bot(IMAGE_BOT_TOKEN)
     for attempt in range(3):
         try:
-            r = await asyncio.to_thread(upload_to_catbox_sync, image_data)
-            if r:
-                return r
+            msg = await bot.send_photo(chat_id=IMAGE_CHAT_ID, photo=image_data)
+            file_id = msg.photo[-1].file_id
+            file = await bot.get_file(file_id)
+            url = f"https://api.telegram.org/file/bot{IMAGE_BOT_TOKEN}/{file.file_path}"
+            # 验证 URL 是否可访问
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.head(url)
+                if r.status_code == 200:
+                    return url
+            print(f"  ⚠️ Telegram CDN URL 不可访问 (重试 {attempt+1})")
         except Exception as e:
-            print(f"  ❌ catbox 上传异常 ({attempt+1}/3): {e}")
-            if attempt < 2:
-                await asyncio.sleep(5)
+            print(f"  ❌ 中转上传异常 ({attempt+1}/3): {e}")
+        if attempt < 2:
+            await asyncio.sleep(5)
     return None
-
-def upload_to_catbox_sync(image_data: bytes) -> str | None:
-    """同步版：用 requests 上传到 catbox.moe"""
-    import requests
-    try:
-        r = requests.post(
-            "https://catbox.moe/user/api.php",
-            data={"reqtype": "fileupload"},
-            files={"fileToUpload": ("image.jpg", image_data, "image/jpeg")},
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://catbox.moe/",
-            },
-            timeout=60,
-        )
-        url = r.text.strip()
-        if url.startswith("https://files.catbox.moe/"):
-            return url
-        else:
-            print(f"  ❌ catbox 上传返回异常: {r.status_code} {url[:100]}")
-    except Exception as e:
-        print(f"  ❌ catbox 上传异常: {e}")
-    return None
-
-def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
-    """用 TG 直链创建 Telegraph 页面"""
-    if not TELEGRAPH_TOKEN:
-        print("  ⚠️ 未配置 TELEGRAPH_TOKEN")
-        return None
-    if not image_urls:
-        return None
-
-    content = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
-    print(f"  📝 创建 Telegraph 页面，共 {len(content)} 张图片")
-
-    # 在末尾追加推广图片和超链接
-    content.append({
-        "tag": "img",
-        "attrs": {"src": "https://i.ibb.co/bYwH4Y2/Chat-GPT-Image-2026-7-2-23-55-12.png"}
-    })
-    content.append({
-        "tag": "p",
-        "children": [
-            {"tag": "a", "attrs": {"href": "http://t.me/fljtkwbot"}, "children": ["🔍 点击搜索更多图集、Cos、福利姬… 懂的都懂 👀"]}
-        ]
-    })
-
-    try:
-        r = requests.post(
-            "https://api.telegra.ph/createPage",
-            json={
-                "access_token": TELEGRAPH_TOKEN,
-                "title": title[:256],
-                "author_name": "EH Cosplay Bot",
-                "content": content,
-                "return_content": False,
-            },
-            timeout=30,
-        )
-        if r.status_code == 200 and r.json().get("ok"):
-            url = r.json()["result"]["url"]
-            print(f"  ✅ Telegraph 页面: {url}")
-            return url
-        else:
-            print(f"  ❌ Telegraph 页面创建失败: {r.text[:120]}")
-            return None
-    except Exception as e:
-        print(f"  ❌ Telegraph 异常: {e}")
-        return None
 
 
 # ========= 状态 =========
@@ -340,12 +282,12 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
         if len(cover_candidates) < 20:
             cover_candidates.append(data)
 
-        tg_url = await upload_to_catbox(data)
+        tg_url = await upload_via_telegram(data)
         if tg_url:
             tg_urls.append(tg_url)
-            print(f"  ✅ [{i+1}/{total}] 图床上传成功")
+            print(f"  ✅ [{i+1}/{total}] 中转上传成功")
         else:
-            print(f"  ⚠️ [{i+1}/{total}] 图床上传失败，跳过")
+            print(f"  ⚠️ [{i+1}/{total}] 中转上传失败，跳过")
 
         del data
         await asyncio.sleep(0.5)
@@ -414,7 +356,7 @@ async def main():
                 save_seen(seen)
                 continue
 
-            print(f"  ✅ 成功上传 {len(tg_urls)}/{len(urls)} 张到 catbox")
+            print(f"  ✅ 成功上传 {len(tg_urls)}/{len(urls)} 张到中转")
 
             # 创建 Telegraph 页面
             telegraph_url = create_telegraph_page(g["title"], tg_urls)
