@@ -46,13 +46,7 @@ async def upload_via_telegram(image_data: bytes) -> str | None:
             msg = await bot.send_photo(chat_id=IMAGE_CHAT_ID, photo=image_data)
             file_id = msg.photo[-1].file_id
             file = await bot.get_file(file_id)
-            url = f"https://api.telegram.org/file/bot{IMAGE_BOT_TOKEN}/{file.file_path}"
-            # 验证 URL 是否可访问
-            async with httpx.AsyncClient(timeout=15) as c:
-                r = await c.head(url)
-                if r.status_code == 200:
-                    return url
-            print(f"  ⚠️ Telegram CDN URL 不可访问 (重试 {attempt+1})")
+            return f"https://api.telegram.org/file/bot{IMAGE_BOT_TOKEN}/{file.file_path}"
         except Exception as e:
             print(f"  ❌ 中转上传异常 ({attempt+1}/3): {e}")
         if attempt < 2:
@@ -391,4 +385,3 @@ async def main():
 
 
 asyncio.run(main())
-
