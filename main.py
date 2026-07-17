@@ -12,12 +12,11 @@ from telegram.constants import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
-IMAGE_BOT_TOKEN = os.getenv("IMAGE_BOT_TOKEN", "6975821458:AAE-zcgfkFh-h_LflZTPMZijHRmgqpfUvFM")
-IMAGE_CHAT_ID = os.getenv("IMAGE_CHAT_ID", "-1002570901960")
 
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
 TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN", "").strip()
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
 
 STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
@@ -37,69 +36,87 @@ COOKIES = {
 }
 
 
-# ========= 通过 Telegram 中转上传 =========
-async def upload_via_telegram(image_data: bytes) -> str | None:
-    """发图到中转群，取 Telegram CDN 直链，供 Telegraph 使用"""
-    bot = Bot(IMAGE_BOT_TOKEN)
+
+# ========= imgbb 双通道慢速上传 =========
+UPLOAD_DELAY = 15  # 每张图间隔秒数（避免限流）
+
+async def upload_to_imgbb_safe(client: httpx.AsyncClient, image_data: bytes) -> str | None:
+    """imgbb 上传：先试匿名，失败后自动切官方 API"""
+    # 通道 1：匿名上传（免费，无 key）
+    url = await upload_imgbb_anonymous(client, image_data)
+    if url:
+        return url
+    # 通道 2：官方 API（有 key，作为备选）
+    url = await upload_imgbb_api(client, image_data)
+    return url
+
+async def upload_imgbb_anonymous(client: httpx.AsyncClient, image_data: bytes) -> str | None:
+    """imgbb 匿名上传"""
+    ext = "jpg"
+    if image_data[:4] == b"\x89PNG":
+        ext = "png"
+    elif image_data[:4] == b"RIFF":
+        ext = "webp"
     for attempt in range(3):
         try:
-            msg = await bot.send_photo(chat_id=IMAGE_CHAT_ID, photo=image_data)
-            file_id = msg.photo[-1].file_id
-            file = await bot.get_file(file_id)
-            return f"https://api.telegram.org/file/bot{IMAGE_BOT_TOKEN}/{file.file_path}"
+            r = await client.post(
+                "https://imgbb.com/json",
+                data={
+                    "type": "file",
+                    "action": "upload",
+                },
+                files={"source": (f"image.{ext}", image_data, f"image/{ext}")},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": "https://imgbb.com/",
+                    "Origin": "https://imgbb.com",
+                },
+                timeout=30,
+            )
+            if r.status_code == 200:
+                resp = r.json()
+                if resp.get("status_code") == 200 and "image" in resp:
+                    return resp["image"]["image"]["url"]
+                elif resp.get("status_code") == 400 and "limit" in str(resp.get("status_txt", "")).lower():
+                    print(f"  ⚠️ 匿名限流，切官方 API")
+                    return None
+                else:
+                    print(f"  ❌ imgbb 匿名错误: {resp.get('status_txt', r.status_code)}")
+            else:
+                print(f"  ❌ imgbb 匿名 HTTP {r.status_code}")
         except Exception as e:
-            print(f"  ❌ 中转上传异常 ({attempt+1}/3): {e}")
+            print(f"  ❌ imgbb 匿名异常 ({attempt+1}/3): {e}")
         if attempt < 2:
             await asyncio.sleep(5)
     return None
 
-
-
-def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
-    """用 TG 直链创建 Telegraph 页面"""
-    if not TELEGRAPH_TOKEN:
-        print("  ⚠️ 未配置 TELEGRAPH_TOKEN")
-        return None
-    if not image_urls:
-        return None
-
-    content = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
-    print(f"  📝 创建 Telegraph 页面，共 {len(content)} 张图片")
-
-    # 在末尾追加推广图片和超链接
-    content.append({
-        "tag": "img",
-        "attrs": {"src": "https://i.ibb.co/bYwH4Y2/Chat-GPT-Image-2026-7-2-23-55-12.png"}
-    })
-    content.append({
-        "tag": "p",
-        "children": [
-            {"tag": "a", "attrs": {"href": "http://t.me/fljtkwbot"}, "children": ["🔍 点击搜索更多图集、Cos、福利姬… 懂的都懂 👀"]}
-        ]
-    })
-
-    try:
-        r = requests.post(
-            "https://api.telegra.ph/createPage",
-            json={
-                "access_token": TELEGRAPH_TOKEN,
-                "title": title[:256],
-                "author_name": "EH Cosplay Bot",
-                "content": content,
-                "return_content": False,
-            },
-            timeout=30,
-        )
-        if r.status_code == 200 and r.json().get("ok"):
-            url = r.json()["result"]["url"]
-            print(f"  ✅ Telegraph 页面: {url}")
-            return url
-        else:
-            print(f"  ❌ Telegraph 页面创建失败: {r.text[:120]}")
-            return None
-    except Exception as e:
-        print(f"  ❌ Telegraph 异常: {e}")
-        return None
+async def upload_imgbb_api(client: httpx.AsyncClient, image_data: bytes) -> str | None:
+    """imgbb 官方 API 上传"""
+    import base64
+    b64 = base64.b64encode(image_data).decode()
+    for attempt in range(3):
+        try:
+            r = await client.post(
+                "https://api.imgbb.com/1/upload",
+                data={"key": IMGBB_API_KEY, "image": b64},
+                timeout=30,
+            )
+            if r.status_code == 200:
+                resp = r.json()
+                if resp.get("success"):
+                    return resp["data"]["url"]
+                else:
+                    print(f"  ❌ imgbb API 错误: {resp.get('status', 'unknown')}")
+            elif r.status_code == 429 or (r.status_code == 400 and "limit" in r.text.lower()):
+                print(f"  ⚠️ API 限流，等待重试")
+                await asyncio.sleep(30)
+            else:
+                print(f"  ❌ imgbb API HTTP {r.status_code}")
+        except Exception as e:
+            print(f"  ❌ imgbb API 异常 ({attempt+1}/3): {e}")
+        if attempt < 2:
+            await asyncio.sleep(5)
+    return None
 
 
 # ========= 状态 =========
@@ -332,15 +349,15 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
         if len(cover_candidates) < 20:
             cover_candidates.append(data)
 
-        tg_url = await upload_via_telegram(data)
+        tg_url = await upload_to_imgbb_safe(client, data)
         if tg_url:
             tg_urls.append(tg_url)
-            print(f"  ✅ [{i+1}/{total}] 中转上传成功")
+            print(f"  ✅ [{i+1}/{total}] imgbb 上传成功")
         else:
-            print(f"  ⚠️ [{i+1}/{total}] 中转上传失败，跳过")
+            print(f"  ⚠️ [{i+1}/{total}] imgbb 上传失败，跳过")
 
         del data
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(UPLOAD_DELAY)
 
     return tg_urls, cover_candidates
 
@@ -406,7 +423,7 @@ async def main():
                 save_seen(seen)
                 continue
 
-            print(f"  ✅ 成功上传 {len(tg_urls)}/{len(urls)} 张到中转")
+            print(f"  ✅ 成功上传 {len(tg_urls)}/{len(urls)} 张到 imgbb")
 
             # 创建 Telegraph 页面
             telegraph_url = create_telegraph_page(g["title"], tg_urls)
