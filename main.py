@@ -119,6 +119,56 @@ async def upload_imgbb_api(client: httpx.AsyncClient, image_data: bytes) -> str 
     return None
 
 
+
+def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
+    """用 imgbb 直链创建 Telegraph 页面"""
+    if not TELEGRAPH_TOKEN:
+        print("  ⚠️ 未配置 TELEGRAPH_TOKEN")
+        return None
+    if not image_urls:
+        return None
+
+    content = [{"tag": "img", "attrs": {"src": url}} for url in image_urls]
+    print(f"  📝 创建 Telegraph 页面，共 {len(content)} 张图片")
+
+    # 在末尾追加推广图片和超链接
+    content.append({
+        "tag": "img",
+        "attrs": {"src": "https://i.ibb.co/bYwH4Y2/Chat-GPT-Image-2026-7-2-23-55-12.png"}
+    })
+    content.append({
+        "tag": "p",
+        "children": [
+            {"tag": "a", "attrs": {"href": "http://t.me/fljtkwbot"}, "children": ["🔍 点击搜索更多图集、Cos、福利姬… 懂的都懂 👀"]}
+        ]
+    })
+
+    try:
+        r = requests.post(
+            "https://api.telegra.ph/createPage",
+            json={
+                "access_token": TELEGRAPH_TOKEN,
+                "title": title[:256],
+                "author_name": "EH Cosplay Bot",
+                "content": content,
+                "return_content": False,
+            },
+            timeout=30,
+        )
+        if r.status_code == 200 and r.json().get("ok"):
+            url = r.json()["result"]["url"]
+            print(f"  ✅ Telegraph 页面: {url}")
+            return url
+        else:
+            print(f"  ❌ Telegraph 页面创建失败: {r.text[:120]}")
+            return None
+    except Exception as e:
+        print(f"  ❌ Telegraph 异常: {e}")
+        return None
+
+
+# ========= 状态 =========
+
 # ========= 状态 =========
 
 # ========= 状态 =========
