@@ -65,7 +65,13 @@ async def upload_via_telegram(image_data: bytes) -> str | None:
 def load_seen():
     if not os.path.exists(STATE_FILE):
         return set()
-    return set(json.load(open(STATE_FILE)))
+    try:
+        data = json.load(open(STATE_FILE))
+        if isinstance(data, list):
+            return set(data)
+        return set()
+    except Exception:
+        return set()
 
 def save_seen(seen):
     json.dump(list(seen), open(STATE_FILE, "w"))
@@ -385,3 +391,4 @@ async def main():
 
 
 asyncio.run(main())
+
