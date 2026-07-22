@@ -37,18 +37,13 @@ COOKIES = {
 
 
 
-# ========= imgbb 双通道慢速上传 =========
-UPLOAD_DELAY = 15  # 每张图间隔秒数（避免限流）
+
+# ========= imgbb 匿名上传 =========
+UPLOAD_DELAY = 6  # 每张图间隔秒数
 
 async def upload_to_imgbb_safe(client: httpx.AsyncClient, image_data: bytes) -> str | None:
-    """imgbb 上传：先试匿名，失败后自动切官方 API"""
-    # 通道 1：匿名上传（免费，无 key）
-    url = await upload_imgbb_anonymous(client, image_data)
-    if url:
-        return url
-    # 通道 2：官方 API（有 key，作为备选）
-    url = await upload_imgbb_api(client, image_data)
-    return url
+    """imgbb 匿名上传"""
+    return await upload_imgbb_anonymous(client, image_data)
 
 async def upload_imgbb_anonymous(client: httpx.AsyncClient, image_data: bytes) -> str | None:
     """imgbb 匿名上传"""
@@ -78,7 +73,7 @@ async def upload_imgbb_anonymous(client: httpx.AsyncClient, image_data: bytes) -
                 if resp.get("status_code") == 200 and "image" in resp:
                     return resp["image"]["image"]["url"]
                 elif resp.get("status_code") == 400 and "limit" in str(resp.get("status_txt", "")).lower():
-                    print(f"  ⚠️ 匿名限流，切官方 API")
+                    print(f"  ⚠️ 匿名限流")
                     return None
                 else:
                     print(f"  ❌ imgbb 匿名错误: {resp.get('status_txt', r.status_code)}")
@@ -89,35 +84,6 @@ async def upload_imgbb_anonymous(client: httpx.AsyncClient, image_data: bytes) -
         if attempt < 2:
             await asyncio.sleep(5)
     return None
-
-async def upload_imgbb_api(client: httpx.AsyncClient, image_data: bytes) -> str | None:
-    """imgbb 官方 API 上传"""
-    import base64
-    b64 = base64.b64encode(image_data).decode()
-    for attempt in range(3):
-        try:
-            r = await client.post(
-                "https://api.imgbb.com/1/upload",
-                data={"key": IMGBB_API_KEY, "image": b64},
-                timeout=30,
-            )
-            if r.status_code == 200:
-                resp = r.json()
-                if resp.get("success"):
-                    return resp["data"]["url"]
-                else:
-                    print(f"  ❌ imgbb API 错误: {resp.get('status', 'unknown')}")
-            elif r.status_code == 429 or (r.status_code == 400 and "limit" in r.text.lower()):
-                print(f"  ⚠️ API 限流，等待重试")
-                await asyncio.sleep(30)
-            else:
-                print(f"  ❌ imgbb API HTTP {r.status_code}")
-        except Exception as e:
-            print(f"  ❌ imgbb API 异常 ({attempt+1}/3): {e}")
-        if attempt < 2:
-            await asyncio.sleep(5)
-    return None
-
 
 
 def create_telegraph_page(title: str, image_urls: list[str]) -> str | None:
@@ -380,6 +346,19 @@ async def download_one(client, url) -> bytes | None:
 
 
 
+# ========= 验证 imgbb 图片是否可用 =========
+
+async def check_imgbb_url(client: httpx.AsyncClient, url: str) -> bool:
+    """HEAD 验证 imgbb URL：正常图 200 + >5KB，坏图 403 + 3002 字节错误占位图"""
+    try:
+        r = await client.head(url, timeout=15)
+        if r.status_code == 200 and int(r.headers.get("content-length", "0")) > 5000:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 # ========= 下载 → 中转上传 → 释放内存 =========
 async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]:
     """
@@ -401,8 +380,19 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
 
         tg_url = await upload_to_imgbb_safe(client, data)
         if tg_url:
-            tg_urls.append(tg_url)
-            print(f"  ✅ [{i+1}/{total}] imgbb 上传成功")
+            if await check_imgbb_url(client, tg_url):
+                tg_urls.append(tg_url)
+                print(f"  ✅ [{i+1}/{total}] imgbb 上传成功")
+            else:
+                # 匿名上传可能返回 URL 但图片已被封禁（403 + 3002 字节错误图），重试一次
+                print(f"  ⚠️ [{i+1}/{total}] 检测到坏图，重试上传...")
+                await asyncio.sleep(3)
+                tg_url = await upload_to_imgbb_safe(client, data)
+                if tg_url and await check_imgbb_url(client, tg_url):
+                    tg_urls.append(tg_url)
+                    print(f"  ✅ [{i+1}/{total}] 重试成功")
+                else:
+                    print(f"  ❌ [{i+1}/{total}] 重试仍坏图，跳过")
         else:
             print(f"  ⚠️ [{i+1}/{total}] imgbb 上传失败，跳过")
 
