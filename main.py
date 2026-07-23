@@ -39,23 +39,21 @@ UPLOAD_DELAY = 1.5
 
 async def upload_to_catbox(client: httpx.AsyncClient, image_data: bytes) -> str | None:
     """上传图片到 catbox.moe，返回直链 URL"""
-    ext = "jpg"
+    ext, mime = "jpg", "image/jpeg"
     if image_data[:4] == b"\x89PNG":
-        ext = "png"
+        ext, mime = "png", "image/png"
     elif image_data[:4] == b"RIFF":
-        ext = "webp"
+        ext, mime = "webp", "image/webp"
+    elif image_data[:3] == b"GIF":
+        ext, mime = "gif", "image/gif"
     for attempt in range(3):
         try:
-            r = await client.post(
-                "https://catbox.moe/user/api.php",
-                data={"reqtype": "fileupload"},
-                files={"fileToUpload": (f"image.{ext}", image_data, f"image/{ext}")},
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "https://catbox.moe/",
-                },
-                timeout=30,
-            )
+            async with httpx.AsyncClient(timeout=30) as catbox_client:
+                r = await catbox_client.post(
+                    "https://catbox.moe/user/api.php",
+                    data={"reqtype": "fileupload"},
+                    files={"fileToUpload": (f"image.{ext}", image_data, mime)},
+                )
             if r.status_code == 200 and r.text.startswith("https://"):
                 return r.text.strip()
             print(f"  ❌ catbox 错误: HTTP {r.status_code} body={r.text[:80]}")
