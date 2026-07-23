@@ -50,6 +50,10 @@ async def upload_to_catbox(client: httpx.AsyncClient, image_data: bytes) -> str 
                 "https://catbox.moe/user/api.php",
                 data={"reqtype": "fileupload"},
                 files={"fileToUpload": (f"image.{ext}", image_data, f"image/{ext}")},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": "https://catbox.moe/",
+                },
                 timeout=30,
             )
             if r.status_code == 200 and r.text.startswith("https://"):
