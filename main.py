@@ -34,31 +34,40 @@ COOKIES = {
 }
 
 
-# ========= catbox.moe 上传 =========
-UPLOAD_DELAY = 1.5
+# ========= imgbb 官方 API 上传 =========
+UPLOAD_DELAY = 2.5
 
-async def upload_to_catbox(client: httpx.AsyncClient, image_data: bytes) -> str | None:
-    """上传图片到 catbox.moe，返回直链 URL"""
-    ext, mime = "jpg", "image/jpeg"
-    if image_data[:4] == b"\x89PNG":
-        ext, mime = "png", "image/png"
-    elif image_data[:4] == b"RIFF":
-        ext, mime = "webp", "image/webp"
-    elif image_data[:3] == b"GIF":
-        ext, mime = "gif", "image/gif"
+class RateLimitError(Exception):
+    """imgbb API 限流，停止上传"""
+
+async def upload_to_imgbb(client: httpx.AsyncClient, image_data: bytes) -> str | None:
+    """imgbb 官方 API 上传（base64），遇到限流抛 RateLimitError"""
+    import base64
+    b64 = base64.b64encode(image_data).decode()
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=30) as catbox_client:
-                r = await catbox_client.post(
-                    "https://catbox.moe/user/api.php",
-                    data={"reqtype": "fileupload"},
-                    files={"fileToUpload": (f"image.{ext}", image_data, mime)},
-                )
-            if r.status_code == 200 and r.text.startswith("https://"):
-                return r.text.strip()
-            print(f"  ❌ catbox 错误: HTTP {r.status_code} body={r.text[:80]}")
+            r = await client.post(
+                "https://api.imgbb.com/1/upload",
+                data={"key": IMGBB_API_KEY, "image": b64},
+                timeout=30,
+            )
+            if r.status_code == 200:
+                resp = r.json()
+                if resp.get("success"):
+                    return resp["data"]["url"]
+                print(f"  ❌ imgbb API 错误: {resp.get('status', 'unknown')}")
+            elif r.status_code == 429:
+                print(f"  ⛔ imgbb API 429 限流，停止上传")
+                raise RateLimitError()
+            elif r.status_code == 400 and "limit" in r.text.lower():
+                print(f"  ⛔ imgbb API 限流（今日额度用完），停止上传")
+                raise RateLimitError()
+            else:
+                print(f"  ❌ imgbb API HTTP {r.status_code}")
+        except RateLimitError:
+            raise
         except Exception as e:
-            print(f"  ❌ catbox 异常 ({attempt+1}/3): {e}")
+            print(f"  ❌ imgbb API 异常 ({attempt+1}/3): {e}")
         if attempt < 2:
             await asyncio.sleep(3)
     return None
@@ -317,12 +326,12 @@ async def download_one(client, url) -> bytes | None:
 
 
 # ========= 下载 → 上传 → 释放内存 =========
-async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]:
+async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes], bool]:
     """
-    逐张下载 → 上传 catbox → 释放内存
-    返回: catbox_urls（Telegraph 可用直链）, 前20张原始数据用于选封面
+    逐张下载 → imgbb 上传 → 释放内存
+    返回: urls, cover_candidates, rate_limited
     """
-    catbox_urls = []
+    img_urls = []
     cover_candidates = []
     total = len(urls)
 
@@ -335,17 +344,22 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes]]
         if len(cover_candidates) < 20:
             cover_candidates.append(data)
 
-        catbox_url = await upload_to_catbox(client, data)
-        if catbox_url:
-            catbox_urls.append(catbox_url)
-            print(f"  ✅ [{i+1}/{total}] catbox 上传成功")
-        else:
-            print(f"  ⚠️ [{i+1}/{total}] catbox 上传失败，跳过")
+        try:
+            img_url = await upload_to_imgbb(client, data)
+            if img_url:
+                img_urls.append(img_url)
+                print(f"  ✅ [{i+1}/{total}] imgbb 上传成功")
+            else:
+                print(f"  ⚠️ [{i+1}/{total}] imgbb 上传失败，跳过")
+        except RateLimitError:
+            print(f"  ⛔ [{i+1}/{total}] 限流，已上传 {len(img_urls)} 张，剩余留着下次发")
+            del data
+            return img_urls, cover_candidates, True
 
         del data
         await asyncio.sleep(UPLOAD_DELAY)
 
-    return catbox_urls, cover_candidates
+    return img_urls, cover_candidates, False
 
 
 async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
@@ -399,17 +413,17 @@ async def main():
 
             print(f"  🔗 共获取 {len(urls)} 个图片 URL")
 
-            catbox_urls, cover_candidates = await download_and_upload_all(client, urls)
+            img_urls, cover_candidates, rate_limited = await download_and_upload_all(client, urls)
 
-            if not catbox_urls:
+            if not img_urls:
                 print(f"  ⚠️ 没有图片上传成功，跳过")
                 seen.add(uid)
                 save_seen(seen)
                 continue
 
-            print(f"  ✅ 成功上传 {len(catbox_urls)}/{len(urls)} 张到 catbox")
+            print(f"  ✅ 成功上传 {len(img_urls)}/{len(urls)} 张到 imgbb")
 
-            telegraph_url = await create_telegraph_page(client, g["title"], catbox_urls)
+            telegraph_url = await create_telegraph_page(client, g["title"], img_urls)
             if not telegraph_url:
                 print(f"  ⚠️ Telegraph 页面创建失败，跳过")
                 seen.add(uid)
@@ -429,6 +443,11 @@ async def main():
 
             seen.add(uid)
             save_seen(seen)
+
+            if rate_limited:
+                print(f"\n⛔ imgbb 今日额度用完，剩余图集留着下次发")
+                save_seen(seen)
+                return
 
 
 asyncio.run(main())
