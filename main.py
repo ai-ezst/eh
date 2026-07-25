@@ -15,6 +15,7 @@ MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
 TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN", "").strip()
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
 
 STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
@@ -35,7 +36,8 @@ COOKIES = {
 
 
 # ========= imgbb 官方 API 上传 =========
-UPLOAD_DELAY = 2.5
+UPLOAD_DELAY = 5
+MAX_UPLOADS_PER_RUN = 50  # 每次运行最多上传张数
 
 class RateLimitError(Exception):
     """imgbb API 限流，停止上传"""
@@ -336,6 +338,9 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes],
     total = len(urls)
 
     for i, url in enumerate(urls):
+        if len(img_urls) >= MAX_UPLOADS_PER_RUN:
+            print(f"  ⛔ 已达上限 {MAX_UPLOADS_PER_RUN} 张，停止上传")
+            return img_urls, cover_candidates, True
         data = await download_one(client, url)
         if not data:
             print(f"  ⚠️ [{i+1}/{total}] 下载失败，跳过")
