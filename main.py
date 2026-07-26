@@ -499,4 +499,12 @@ async def main():
                 return
 
 
-asyncio.run(main())
+# Railway: 每 12 小时运行一次，保持进程存活
+import time
+while True:
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"\n❌ 运行异常: {e}")
+    print(f"\n⏰ 等待 12 小时后再次运行...")
+    time.sleep(12 * 3600)
