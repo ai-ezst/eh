@@ -8,6 +8,7 @@ from PIL import Image
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.constants import ParseMode
+from proxy_pool import pool, PROXY_SOURCES
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
@@ -15,7 +16,6 @@ MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
 TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN", "").strip()
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "f9a91080e291580c5e12b7efc7ade18d")
 
 STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
@@ -35,43 +35,58 @@ COOKIES = {
 }
 
 
-# ========= imgbb 官方 API 上传 =========
-UPLOAD_DELAY = 5
-MAX_UPLOADS_PER_RUN = 50  # 每次运行最多上传张数
+# ========= imgbb 匿名上传（代理池） =========
+UPLOAD_DELAY = 3
 
 class RateLimitError(Exception):
-    """imgbb API 限流，停止上传"""
+    """上传失败/限流"""
 
-async def upload_to_imgbb(client: httpx.AsyncClient, image_data: bytes) -> str | None:
-    """imgbb 官方 API 上传（base64），遇到限流抛 RateLimitError"""
-    import base64
-    b64 = base64.b64encode(image_data).decode()
+async def upload_to_imgbb(image_data: bytes) -> str | None:
+    """imgbb 匿名上传，通过代理池轮换 IP"""
+    ext = "jpg"
+    if image_data[:4] == b"\x89PNG":
+        ext = "png"
+    elif image_data[:4] == b"RIFF":
+        ext = "webp"
+
     for attempt in range(3):
+        proxy = pool.get()
+        if not proxy:
+            print(f"  ⚠️ 无可用代理，等待刷新...")
+            await pool.refresh(force=True)
+            proxy = pool.get()
+            if not proxy:
+                print(f"  ❌ 代理池为空，放弃上传")
+                return None
+
         try:
-            r = await client.post(
-                "https://api.imgbb.com/1/upload",
-                data={"key": IMGBB_API_KEY, "image": b64},
-                timeout=30,
-            )
+            async with httpx.AsyncClient(proxy=proxy, timeout=30) as imgbb_client:
+                r = await imgbb_client.post(
+                    "https://imgbb.com/json",
+                    data={"type": "file", "action": "upload"},
+                    files={"source": (f"image.{ext}", image_data, f"image/{ext}")},
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://imgbb.com/",
+                        "Origin": "https://imgbb.com",
+                    },
+                )
             if r.status_code == 200:
                 resp = r.json()
-                if resp.get("success"):
-                    return resp["data"]["url"]
-                print(f"  ❌ imgbb API 错误: {resp.get('status', 'unknown')}")
-            elif r.status_code == 429:
-                print(f"  ⛔ imgbb API 429 限流，停止上传")
-                raise RateLimitError()
-            elif r.status_code == 400 and "limit" in r.text.lower():
-                print(f"  ⛔ imgbb API 限流（今日额度用完），停止上传")
-                raise RateLimitError()
+                if resp.get("status_code") == 200 and "image" in resp:
+                    return resp["image"]["image"]["url"]
+                print(f"  ❌ imgbb 匿名错误: {resp.get('status_txt', 'unknown')}")
+            elif r.status_code in (403, 429):
+                print(f"  ⚠️ 代理 {proxy} 被限制，移除")
+                pool.remove(proxy)
             else:
-                print(f"  ❌ imgbb API HTTP {r.status_code}")
-        except RateLimitError:
-            raise
+                print(f"  ❌ imgbb 匿名 HTTP {r.status_code}")
         except Exception as e:
-            print(f"  ❌ imgbb API 异常 ({attempt+1}/3): {e}")
+            print(f"  ⚠️ 代理 {proxy} 失败: {e}")
+            pool.remove(proxy)
+
         if attempt < 2:
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
     return None
 
 
@@ -311,12 +326,24 @@ async def get_all_image_urls(client, base_url):
 
 # ========= 下载单张图片 =========
 
+def is_valid_image(data: bytes) -> bool:
+    """验证图片文件是否完整可解码"""
+    try:
+        img = Image.open(BytesIO(data))
+        img.verify()
+        return True
+    except Exception:
+        return False
+
 async def download_one(client, url) -> bytes | None:
     for attempt in range(3):
         try:
             r = await client.get(url, timeout=30)
             if r.status_code == 200 and 5000 < len(r.content) < 10 * 1024 * 1024:
-                return r.content
+                if is_valid_image(r.content):
+                    return r.content
+                print(f"  ⚠️ 图片损坏，重试")
+                continue
             if r.status_code == 509:
                 print(f"  ⚠️ E-Hentai 509 流量超限，等待 60s...")
                 await asyncio.sleep(60)
@@ -338,9 +365,7 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes],
     total = len(urls)
 
     for i, url in enumerate(urls):
-        if len(img_urls) >= MAX_UPLOADS_PER_RUN:
-            print(f"  ⛔ 已达上限 {MAX_UPLOADS_PER_RUN} 张，停止上传")
-            return img_urls, cover_candidates, True
+
         data = await download_one(client, url)
         if not data:
             print(f"  ⚠️ [{i+1}/{total}] 下载失败，跳过")
@@ -350,7 +375,7 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes],
             cover_candidates.append(data)
 
         try:
-            img_url = await upload_to_imgbb(client, data)
+            img_url = await upload_to_imgbb(data)
             if img_url:
                 img_urls.append(img_url)
                 print(f"  ✅ [{i+1}/{total}] imgbb 上传成功")
@@ -391,6 +416,9 @@ async def main():
 
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
+
+    # 初始化代理池
+    await pool.refresh(force=True)
 
     async with httpx.AsyncClient(
         headers=HEADERS,

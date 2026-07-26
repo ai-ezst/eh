@@ -36,7 +36,6 @@ jobs:
           PYTHONUNBUFFERED: 1
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           MAIN_CHANNEL_ID: ${{ secrets.MAIN_CHANNEL_ID }}
-          IMAGE_CHANNEL_ID: ${{ secrets.IMAGE_CHANNEL_ID }}
           EH_MEMBER_ID: ${{ secrets.EH_MEMBER_ID }}
           EH_PASS_HASH: ${{ secrets.EH_PASS_HASH }}
           TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
