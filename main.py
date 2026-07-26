@@ -36,29 +36,42 @@ COOKIES = {
 
 
 # ========= imgbb 匿名上传（代理池） =========
-UPLOAD_DELAY = 3
+UPLOAD_DELAY = 1       # 每张图片之间间隔 1 秒
+RETRY_DELAY_BASE = 5   # 重试递增秒数
+RETRY_DELAY_MAX = 15   # 重试最长秒数
+MAX_RETRIES = 3        # 最多重试次数（每张图最多尝试4次）
 
 class RateLimitError(Exception):
     """上传失败/限流"""
 
+async def check_imgbb_url(url: str) -> bool:
+    """HEAD 验证 imgbb URL 是否可访问（排除坏图/屏蔽图）"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.head(url)
+            if r.status_code == 200 and int(r.headers.get("content-length", "0")) > 5000:
+                return True
+    except Exception:
+        pass
+    return False
+
 async def upload_to_imgbb(image_data: bytes) -> str | None:
-    """imgbb 匿名上传，通过代理池轮换 IP"""
+    """imgbb 匿名上传 + 验证 + 递增退避重试"""
     ext = "jpg"
     if image_data[:4] == b"\x89PNG":
         ext = "png"
     elif image_data[:4] == b"RIFF":
         ext = "webp"
 
-    for attempt in range(3):
+    for attempt in range(MAX_RETRIES + 1):  # 总共尝试 4 次
         proxy = pool.get()
         if not proxy:
-            print(f"  ⚠️ 无可用代理，等待刷新...")
             await pool.refresh(force=True)
             proxy = pool.get()
             if not proxy:
-                print(f"  ❌ 代理池为空，放弃上传")
                 return None
 
+        url = None
         try:
             async with httpx.AsyncClient(proxy=proxy, timeout=30) as imgbb_client:
                 r = await imgbb_client.post(
@@ -74,19 +87,22 @@ async def upload_to_imgbb(image_data: bytes) -> str | None:
             if r.status_code == 200:
                 resp = r.json()
                 if resp.get("status_code") == 200 and "image" in resp:
-                    return resp["image"]["image"]["url"]
-                print(f"  ❌ imgbb 匿名错误: {resp.get('status_txt', 'unknown')}")
+                    url = resp["image"]["image"]["url"]
             elif r.status_code in (403, 429):
-                print(f"  ⚠️ 代理 {proxy} 被限制，移除")
                 pool.remove(proxy)
-            else:
-                print(f"  ❌ imgbb 匿名 HTTP {r.status_code}")
-        except Exception as e:
-            print(f"  ⚠️ 代理 {proxy} 失败: {e}")
+        except Exception:
             pool.remove(proxy)
 
-        if attempt < 2:
-            await asyncio.sleep(2)
+        # 验证上传结果
+        if url and await check_imgbb_url(url):
+            return url
+
+        # 还有重试机会
+        if attempt < MAX_RETRIES:
+            delay = min(RETRY_DELAY_BASE * (attempt + 1), RETRY_DELAY_MAX)
+            print(f"  🔄 重试 {attempt+1}/{MAX_RETRIES}，等待 {delay}s...")
+            await asyncio.sleep(delay)
+
     return None
 
 
