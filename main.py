@@ -45,12 +45,12 @@ class RateLimitError(Exception):
     """上传失败/限流"""
 
 async def check_imgbb_url(url: str) -> bool:
-    """HEAD 验证 imgbb URL 是否可访问（排除坏图/屏蔽图）"""
+    """下载 imgbb URL 并用 PIL 验证是否是真实图片（排除错误占位图）"""
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.head(url)
-            if r.status_code == 200 and int(r.headers.get("content-length", "0")) > 5000:
-                return True
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(url)
+            if r.status_code == 200 and len(r.content) > 5000:
+                return is_valid_image(r.content)
     except Exception:
         pass
     return False
