@@ -8,7 +8,6 @@ from PIL import Image
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.constants import ParseMode
-from proxy_pool import pool, PROXY_SOURCES
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
@@ -422,9 +421,6 @@ async def main():
 
     bot = Bot(BOT_TOKEN)
     seen = load_seen()
-
-    # 初始化代理池
-    await pool.refresh(force=True)
 
     async with httpx.AsyncClient(
         headers=HEADERS,
