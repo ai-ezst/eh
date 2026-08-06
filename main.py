@@ -35,7 +35,7 @@ COOKIES = {
 }
 
 
-# ========= imgbb 匿名上传（代理池） =========
+# ========= pixhost.to 上传 =========
 UPLOAD_DELAY = 1       # 每张图片之间间隔 1 秒
 RETRY_DELAY_BASE = 5   # 重试递增秒数
 RETRY_DELAY_MAX = 15   # 重试最长秒数
@@ -45,7 +45,7 @@ class RateLimitError(Exception):
     """上传失败/限流"""
 
 async def check_imgbb_url(url: str) -> bool:
-    """下载 imgbb URL 并用 PIL 验证是否是真实图片（排除错误占位图）"""
+    """下载 URL 并用 PIL 验证是否是真实图片"""
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(url)
@@ -55,8 +55,8 @@ async def check_imgbb_url(url: str) -> bool:
         pass
     return False
 
-async def upload_to_imgbb(image_data: bytes) -> str | None:
-    """imgbb 匿名上传 + 验证 + 递增退避重试"""
+async def upload_to_pixhost(image_data: bytes) -> str | None:
+    """pixhost.to 上传（支持成人内容）+ 验证 + 递增退避重试"""
     ext = "jpg"
     if image_data[:4] == b"\x89PNG":
         ext = "png"
@@ -64,34 +64,23 @@ async def upload_to_imgbb(image_data: bytes) -> str | None:
         ext = "webp"
 
     for attempt in range(MAX_RETRIES + 1):  # 总共尝试 4 次
-        proxy = pool.get()
-        if not proxy:
-            await pool.refresh(force=True)
-            proxy = pool.get()
-            if not proxy:
-                return None
-
         url = None
         try:
-            async with httpx.AsyncClient(proxy=proxy, timeout=30) as imgbb_client:
-                r = await imgbb_client.post(
-                    "https://imgbb.com/json",
-                    data={"type": "file", "action": "upload"},
-                    files={"source": (f"image.{ext}", image_data, f"image/{ext}")},
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Referer": "https://imgbb.com/",
-                        "Origin": "https://imgbb.com",
-                    },
+            async with httpx.AsyncClient(timeout=30) as pix_client:
+                r = await pix_client.post(
+                    "https://api.pixhost.to/images",
+                    data={"content_type": "1"},  # 1 = 成人内容
+                    files={"img": (f"image.{ext}", image_data, f"image/{ext}")},
                 )
             if r.status_code == 200:
                 resp = r.json()
-                if resp.get("status_code") == 200 and "image" in resp:
-                    url = resp["image"]["image"]["url"]
-            elif r.status_code in (403, 429):
-                pool.remove(proxy)
-        except Exception:
-            pool.remove(proxy)
+                if resp.get("show_url"):
+                    # 从 show_url 构造直链
+                    url = resp["show_url"].replace(
+                        "https://pixhost.to/show/", "https://img2.pixhost.to/images/"
+                    )
+        except Exception as e:
+            print(f"  ⚠️ pixhost 异常: {e}")
 
         # 验证上传结果
         if url and await check_imgbb_url(url):
@@ -104,6 +93,7 @@ async def upload_to_imgbb(image_data: bytes) -> str | None:
             await asyncio.sleep(delay)
 
     return None
+
 
 
 async def create_telegraph_page(client: httpx.AsyncClient, title: str, image_urls: list[str]) -> str | None:
@@ -373,7 +363,7 @@ async def download_one(client, url) -> bytes | None:
 # ========= 下载 → 上传 → 释放内存 =========
 async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes], bool]:
     """
-    逐张下载 → imgbb 上传 → 释放内存
+    逐张下载 → pixhost 上传 → 释放内存
     返回: urls, cover_candidates, rate_limited
     """
     img_urls = []
@@ -391,12 +381,12 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes],
             cover_candidates.append(data)
 
         try:
-            img_url = await upload_to_imgbb(data)
+            img_url = await upload_to_pixhost(data)
             if img_url:
                 img_urls.append(img_url)
-                print(f"  ✅ [{i+1}/{total}] imgbb 上传成功")
+                print(f"  ✅ [{i+1}/{total}] pixhost 上传成功")
             else:
-                print(f"  ⚠️ [{i+1}/{total}] imgbb 上传失败，跳过")
+                print(f"  ⚠️ [{i+1}/{total}] pixhost 上传失败，跳过")
         except RateLimitError:
             print(f"  ⛔ [{i+1}/{total}] 限流，已上传 {len(img_urls)} 张，剩余留着下次发")
             del data
@@ -470,7 +460,7 @@ async def main():
                 save_seen(seen)
                 continue
 
-            print(f"  ✅ 成功上传 {len(img_urls)}/{len(urls)} 张到 imgbb")
+            print(f"  ✅ 成功上传 {len(img_urls)}/{len(urls)} 张到 pixhost")
 
             telegraph_url = await create_telegraph_page(client, g["title"], img_urls)
             if not telegraph_url:
@@ -494,7 +484,7 @@ async def main():
             save_seen(seen)
 
             if rate_limited:
-                print(f"\n⛔ imgbb 今日额度用完，剩余图集留着下次发")
+                print(f"\n⛔ 上传失败次数过多，剩余图集留着下次发")
                 save_seen(seen)
                 return
 
