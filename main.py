@@ -15,6 +15,9 @@ MAIN_CHANNEL = os.getenv("MAIN_CHANNEL_ID")
 EH_MEMBER_ID = os.getenv("EH_MEMBER_ID")
 EH_PASS_HASH = os.getenv("EH_PASS_HASH")
 TELEGRAPH_TOKEN = os.getenv("TELEGRAPH_TOKEN", "").strip()
+AGNES_API_KEY = os.getenv("AGNES_API_KEY", "").strip()
+AGNES_BASE_URL = os.getenv("AGNES_BASE_URL", "https://apihub.agnes-ai.com/v1").strip().rstrip("/")
+AGNES_MODEL = os.getenv("AGNES_MODEL", "agnes-2.0-flash").strip()
 
 STATE_FILE = "sent_galleries.json"
 COSPLAY_URL = "https://e-hentai.org/?f_cats=959"
@@ -185,6 +188,57 @@ def generate_tags(title: str) -> str:
         if f"#{w}" not in tags:
             tags.append(f"#{w}")
     return " ".join(tags)
+
+
+AGNES_SYSTEM_PROMPT = (
+    "You are a cosplay gallery hashtag assistant. Based on the gallery title, "
+    "write 3-6 concise English hashtags separated by spaces. "
+    "Output only the tags: no numbering, no explanations, no '#' symbols. "
+    "Tags should cover character, series/game and theme. "
+    "Example: title 「Velvet-chann - Link Ninja」 -> Velvetchann Zelda Link Ninja Cosplay"
+)
+
+
+async def generate_tags_ai(title: str) -> str:
+    """调用 Agnes AI 根据标题生成标签；失败时回退规则标签"""
+    if not AGNES_API_KEY:
+        print("  ⚠️ 未配置 AGNES_API_KEY，使用规则标签")
+        return generate_tags(title)
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{AGNES_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {AGNES_API_KEY}"},
+                json={
+                    "model": AGNES_MODEL,
+                    "messages": [
+                        {"role": "system", "content": AGNES_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"标题：{title}"},
+                    ],
+                    "max_tokens": 300,
+                    "temperature": 0.4,
+                },
+            )
+        if r.status_code != 200:
+            print(f"  ⚠️ Agnes 标签接口异常 ({r.status_code}): {r.text[:120]}")
+            return generate_tags(title)
+        content = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+        tags = []
+        for part in re.split(r"[\s,,、，;\n]+", content):
+            tag = part.strip().lstrip("#")
+            if not tag or not any(ch.isalnum() for ch in tag):
+                continue
+            if tag.lower() not in [t.lower() for t in tags]:
+                tags.append(tag)
+        tags = tags[:8]
+        if tags:
+            result = " ".join(f"#{t}" for t in tags)
+            print(f"  🤖 AI 标签: {result}")
+            return result
+        print("  ⚠️ Agnes 未返回有效标签，使用规则标签")
+    except Exception as e:
+        print(f"  ⚠️ Agnes 调用异常: {e}")
+    return generate_tags(title)
 
 
 # ========= 选最佳封面 =========
@@ -398,7 +452,7 @@ async def download_and_upload_all(client, urls) -> tuple[list[str], list[bytes],
 
 
 async def send_cover(bot, image: bytes, title: str, telegraph_url: str):
-    tags = generate_tags(title)
+    tags = await generate_tags_ai(title)
     caption = (
         f"<b>{title}</b>\n"
         f"{tags}\n\n"
